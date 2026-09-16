@@ -1,0 +1,11 @@
+# Dependências do pipeline Mondesa (main.py)
+# Testado com Python 3.12. Para reprodutibilidade completa, substitua
+# os '>=' por '==' com as versões exatas do ambiente Kaggle original
+# (rode `pip freeze` na sessão do Kaggle e cole aqui).
+numpy>=1.26
+pandas>=2.0
+tensorflow>=2.15
+scikit-learn>=1.3
+scipy>=1.11
+matplotlib>=3.8
+seaborn>=0.13
