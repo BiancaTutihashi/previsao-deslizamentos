@@ -1,9 +1,9 @@
 data/
 *.csv
-resultados/
+todos-resultados/
 *.pdf
 __pycache__/
 *.keras
-!resultados_atualizados
+!resultados
 *.ogg
 etc
