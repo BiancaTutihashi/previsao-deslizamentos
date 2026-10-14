@@ -16,6 +16,10 @@ from main import (
     extrair_ciclos,
     avaliar_transicoes,
     dividir_dados_brutos_cronologico,
+    rotular_estados,
+    estimar_limiar_otsu,
+    preparar_sequencias,
+    avaliar_baseline_trivial,
 )
 
 
@@ -120,3 +124,40 @@ def test_divisao_e_cronologica_e_nao_embaralha():
     assert idx_tr.max() < idx_va.min()
     assert idx_va.max() < idx_te.min()
     assert len(idx_tr) + len(idx_va) + len(idx_te) == n
+
+# ---------- rótulos x baselines (circularidade) ----------
+
+def test_otsu_separa_modos_sem_usar_rotulos():
+    rng = np.random.default_rng(0)
+    potencia = np.r_[rng.normal(55, 3, 5000), rng.normal(300, 20, 500)]
+    limiar = estimar_limiar_otsu(potencia)
+    assert 70 < limiar < 250
+
+
+def test_preparar_sequencias_alvo_fora_da_janela():
+    dados = np.arange(20, dtype=float)
+    for h in (1, 5):
+        X, y, idx = preparar_sequencias(dados, dados, seq_length=4, horizonte=h)
+        # alvo = última amostra da janela + h
+        assert np.all(y == X[:, -1, 0] + h)
+        assert np.all(idx == y.astype(int))
+    with pytest.raises(ValueError):
+        preparar_sequencias(dados, dados, seq_length=4, horizonte=0)
+
+
+def test_baseline_trivial_nao_e_a_regra_de_rotulagem():
+    """
+    Regressão para a revisão (áudio): o baseline usava x[t] > 100 mW,
+    a mesma regra que gera Estado_Real, então acertava 100% por construção.
+    O baseline atual usa x[t-h] (o que o LSTM vê) e erra nas transições.
+    """
+    tempo = np.arange(400, dtype=float)
+    potencia = np.where((tempo % 100) >= 90, 300.0, 55.0)
+    estados = rotular_estados(potencia, 100.0)
+    X, y, idx = preparar_sequencias(potencia, estados, seq_length=10, horizonte=1)
+
+    regra_do_rotulo = (potencia[idx] > 100.0).astype(int)
+    assert np.array_equal(regra_do_rotulo, y)  # circular: 100% garantido
+
+    m = avaliar_baseline_trivial(potencia[idx - 1], y, threshold=estimar_limiar_otsu(potencia))
+    assert m['accuracy'] < 1.0
