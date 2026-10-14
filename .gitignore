@@ -1,1 +1,9 @@
-data/, *.csv, resultados/, *.pdf, __pycache__/, *.keras, !resultados_atualizados/,etc.
+data/
+*.csv
+resultados/
+*.pdf
+__pycache__/
+*.keras
+!resultados_atualizados
+*.ogg
+etc
