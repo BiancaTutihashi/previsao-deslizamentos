@@ -1,310 +1,132 @@
-"""Projeto Mondesa — LSTM DORMINDO/ACORDADO, com baseline heurístico e trivial."""
-import os, random, argparse
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+"""Projeto Mondesa — detecção de ciclos (t0, t1, t2) em séries de potência.
+
+Pipeline organizado pelas fases do roadmap:
+  0. primeiro contato com os dados (dados.py)
+  1. baseline heurístico (heuristico.py)
+  2. rótulos verdadeiros t0/t1/t2 (rotulagem.py)
+  3. classificação ponto a ponto: Regressão Logística, Random Forest (modelos.py)
+  4. HMM de 2 estados e ruptures (modelos.py)
+  5. avaliação por evento: MAE em segundos + precisão/revocação com tolerância (avaliacao.py)
+  6. LSTM (lstm.py)
+"""
+import argparse
+import os
+import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from datetime import datetime
 
-import tensorflow as tf
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.callbacks import EarlyStopping
+from ciclos import (ciclos_para_estados, estados_para_eventos, estados_para_ciclos,
+                    agrupar_ciclos_contiguos, analisar_ciclos)
+from dados import secao, carregar_csv, gerar_serie_sintetica, eda, plotar_eda, salvar_eda_html
+from heuristico import estimar_limiar_otsu, estados_heuristico
+from rotulagem import carregar_rotulos, rotulos_provisorios, salvar_rotulos, plotar_ciclos_rotulados
+from avaliacao import avaliar_modelo, metricas_amostra
 
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.utils.class_weight import compute_class_weight
-import seaborn as sns
-from scipy.signal import savgol_filter
-
-
-def configurar_sementes(seed=42):
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed); np.random.seed(seed)
-    tf.random.set_seed(seed); tf.keras.utils.set_random_seed(seed)
+MODELOS = ['limiar', 'heuristico', 'logreg', 'rf', 'hmm', 'ruptures', 'lstm']
+NOMES = {'limiar': 'Limiar simples (Otsu)', 'heuristico': 'Heurístico (mediana+Otsu)',
+         'logreg': 'Regressão Logística', 'rf': 'Random Forest', 'hmm': 'HMM 2 estados',
+         'ruptures': 'ruptures (KernelCPD)', 'lstm': 'LSTM'}
+MIN_DURACAO_S = 1.0   # pulsos mais curtos que isso são ruído (o período ativo dura ~6,5 s)
+MARGEM_S = 10.0       # contexto extra em volta de cada trecho avaliado
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--csv-path', default=os.environ.get(
         'MONDESA_CSV_PATH', '/kaggle/input/datasets/biancatutihashi/experiment4-0/experiment4-0.CSV'))
+    p.add_argument('--rotulos', default=os.environ.get('MONDESA_ROTULOS', 'rotulos/rotulos_ciclos.csv'),
+                   help='CSV ciclo_id,t0,t1,t2 com os rótulos verdadeiros (Fase 2)')
     p.add_argument('--output-dir', default=os.environ.get('MONDESA_OUTPUT_DIR', './resultados'))
-    p.add_argument('--horizonte', type=int, default=1,
-                   help='quantas amostras à frente o estado é previsto (1 = próxima amostra)')
-    args, _ = p.parse_known_args()
+    p.add_argument('--tolerancia', type=float, default=1.0,
+                   help='janela de tolerância (s) para contar um evento como acerto')
+    p.add_argument('--modelos', default=','.join(MODELOS), help=f'subconjunto de {",".join(MODELOS)}')
+    p.add_argument('--epocas', type=int, default=100, help='máximo de épocas da LSTM (early stopping)')
+    p.add_argument('--lstm-passo', type=int, default=1,
+                   help='usa 1 a cada N janelas no treino da LSTM (acelera em CPU)')
+    p.add_argument('--sintetico-ciclos', type=int, default=40,
+                   help='nº de ciclos da série sintética usada quando o CSV não existe')
+    args, _ = p.parse_known_args(argv)
+    args.modelos = [m.strip() for m in args.modelos.split(',') if m.strip()]
+    desconhecidos = set(args.modelos) - set(MODELOS)
+    if desconhecidos:
+        p.error(f"modelos desconhecidos: {sorted(desconhecidos)}")
     return args
 
 
-def secao(titulo):
-    print("=" * 80); print(titulo); print("=" * 80)
+def obter_rotulos(args, tempo, potencia, ciclos_sinteticos):
+    """Fase 2: rótulos manuais se existirem; senão gabarito sintético; senão rótulo provisório."""
+    secao("FASE 2: RÓTULOS t0/t1/t2")
+    if ciclos_sinteticos is not None:
+        print(f"Série sintética: usando os {len(ciclos_sinteticos)} ciclos verdadeiros do gerador.\n")
+        return ciclos_sinteticos, 'sintetico'
+    if args.rotulos and os.path.exists(args.rotulos):
+        ciclos = carregar_rotulos(args.rotulos)
+        print(f"✓ {len(ciclos)} ciclos rotulados lidos de {args.rotulos}\n")
+        return ciclos, 'arquivo'
+    ciclos = rotulos_provisorios(potencia, tempo, limiar_mw=100.0, min_duracao_s=MIN_DURACAO_S)
+    caminho = salvar_rotulos(ciclos, os.path.join(args.output_dir, 'rotulos_provisorios.csv'), revisado=0)
+    print("⚠️⚠️ SEM RÓTULOS MANUAIS ⚠️⚠️\n"
+          f"   '{args.rotulos}' não existe. Usando rótulos PROVISÓRIOS (limiar fixo de 100 mW sobre a\n"
+          "   própria potência). Eles NÃO são ground truth: as métricas abaixo medem o quanto os modelos\n"
+          "   reproduzem essa regra. Gere rótulos de verdade com `python rotulagem.py propor ...`.\n"
+          f"   ({len(ciclos)} ciclos provisórios salvos em {caminho})\n")
+    return ciclos, 'provisorio'
 
 
-def _calcular_cv_seguro(vetor):
-    if len(vetor) == 0:
-        return 0.0
-    media, desvio = float(np.mean(vetor)), float(np.std(vetor))
-    if media == 0 or np.isnan(media) or np.isnan(desvio):
-        return 0.0
-    return (desvio / media) * 100.0
+def dividir_ciclos(ciclos, frac_treino=0.6, frac_val=0.2):
+    """Corte cronológico por ciclo (sem embaralhar): 60% treino, 20% validação, 20% teste."""
+    n = len(ciclos)
+    if n < 5:
+        raise ValueError(f"São necessários pelo menos 5 ciclos rotulados (há {n}).")
+    n_tr = max(1, int(round(frac_treino * n)))
+    n_va = max(1, int(round(frac_val * n)))
+    n_tr = min(n_tr, n - n_va - 1)
+    return ciclos[:n_tr], ciclos[n_tr:n_tr + n_va], ciclos[n_tr + n_va:]
 
 
-def eda_inspect_csv(path):
-    df = pd.read_csv(path)
-    secao("FASE 0: EDA")
-    print(f"Shape: {df.shape} | Nulos: {df.isnull().sum().sum()}")
-    time_col = next((c for c in df.columns if any(x in c.lower() for x in ['tempo', 'time', 'delta'])), df.columns[0])
-    if np.issubdtype(df[time_col].dtype, np.number):
-        diffs = df[time_col].diff().dropna().values
-        cv = _calcular_cv_seguro(diffs)
-        status = "⚠️ irregular" if cv > 10 else "✓ regular"
-        print(f"Passo temporal ({time_col}): média={np.mean(diffs):.4f}s, CV={cv:.2f}% ({status})")
-    print()
-    return df
+def indices_dos_ciclos(tempo, ciclos):
+    _, m = ciclos_para_estados(tempo, ciclos)
+    return np.flatnonzero(m)
 
 
-def rotular_estados(potencia, limiar_mw=100.0):
-    """Rótulo ARTIFICIAL: limiar físico fixo sobre o próprio sinal (ver README)."""
-    return (np.asarray(potencia, dtype=float) > limiar_mw).astype(int)
+def trechos(tempo, ciclos, margem_s=MARGEM_S):
+    """Intervalos de índice [a, b) de cada bloco contínuo de ciclos, com margem de contexto."""
+    out = []
+    for bloco in agrupar_ciclos_contiguos(ciclos):
+        a, b = np.searchsorted(tempo, [bloco[0]['t0'] - margem_s, bloco[-1]['t2'] + margem_s])
+        out.append((int(a), int(min(b, len(tempo)))))
+    return out
 
 
-def estimar_limiar_otsu(potencia, bins=256):
-    """Limiar não supervisionado (Otsu) estimado só com a potência, sem ver os rótulos.
-
-    Os baselines usam este limiar em vez do limiar do rótulo; se usassem o
-    mesmo (100 mW), reproduziriam a regra de rotulagem e acertariam 100%
-    por construção.
-    """
-    hist, bordas = np.histogram(np.asarray(potencia, dtype=float), bins=bins)
-    centros = (bordas[:-1] + bordas[1:]) / 2
-    w0 = np.cumsum(hist); w1 = w0[-1] - w0
-    soma0 = np.cumsum(hist * centros); soma1 = soma0[-1] - soma0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        var_entre = w0 * w1 * (soma0 / w0 - soma1 / w1) ** 2
-    var_entre = np.nan_to_num(var_entre[:-1], nan=-1.0)
-    # entre modos bem separados há um platô de máximo (bins vazios): usa o meio dele
-    k = np.flatnonzero(np.isclose(var_entre, var_entre.max()))
-    k = k[k - k[0] == np.arange(len(k))]  # só o primeiro bloco contíguo
-    return float(bordas[(k[0] + k[-1]) // 2 + 1])
+def avaliar_preditor(prever, tempo, estados_reais, ciclos, tol_s):
+    """Roda `prever(a, b)` em cada trecho e aplica as métricas de evento (Fase 5)."""
+    subidas, descidas, ciclos_pred, y_real, y_pred = [], [], [], [], []
+    _, rotulado = ciclos_para_estados(tempo, ciclos)
+    for a, b in trechos(tempo, ciclos):
+        est = prever(a, b)
+        s, d = estados_para_eventos(est, tempo[a:b], MIN_DURACAO_S)
+        subidas += list(s); descidas += list(d)
+        ciclos_pred += estados_para_ciclos(est, tempo[a:b], MIN_DURACAO_S)
+        m = rotulado[a:b]
+        y_real.append(estados_reais[a:b][m]); y_pred.append(est[m])
+    r = avaliar_modelo(subidas, descidas, ciclos_pred, ciclos, tol_s)
+    r.update(metricas_amostra(np.concatenate(y_real), np.concatenate(y_pred)))
+    return r, ciclos_pred
 
 
-def detectar_ciclos_heuristico(potencia, tempo, threshold=100.0, min_duracao_s=0.5, window_len=51, polyorder=3):
-    n = len(potencia)
-    if n <= 3:
-        raise ValueError("Sinal muito curto")
-    if window_len >= n:
-        window_len = n - 1 if (n - 1) % 2 == 1 else n - 2
-    if window_len % 2 == 0:
-        window_len = max(3, window_len - 1)
-    try:
-        potencia_suave = savgol_filter(potencia, window_length=window_len, polyorder=polyorder)
-    except Exception:
-        w = max(1, window_len // 3)
-        potencia_suave = pd.Series(potencia).rolling(window=w, min_periods=1, center=True).mean().values
-
-    acima = potencia_suave > threshold
-    dif = np.diff(acima.astype(int))
-    on_idx = np.where(dif == 1)[0] + 1
-    off_idx = np.where(dif == -1)[0] + 1
-    if acima[0]:
-        on_idx = np.concatenate(([0], on_idx))
-    if acima[-1]:
-        off_idx = np.concatenate((off_idx, [len(acima)]))
-
-    ciclos = [{'t0': float(tempo[on]), 't1': float(tempo[off - 1]), 't2': None,
-               'duracao_acordado': float(tempo[off - 1] - tempo[on])}
-              for on, off in zip(on_idx, off_idx) if tempo[off - 1] - tempo[on] >= min_duracao_s]
-    print(f"Heurística: {len(ciclos)} eventos (threshold={threshold:.1f} mW)")
-    return ciclos, potencia_suave
+def imprimir_resultado(nome, r, tol_s):
+    print(f"{nome}: F1 eventos (±{tol_s}s)={r['f1']*100:.2f}% "
+          f"[P={r['precisao']*100:.1f}% R={r['revocacao']*100:.1f}%] | "
+          f"MAE t0={r['mae_t0_s']:.3f}s t1={r['mae_t1_s']:.3f}s t2={r['mae_t2_s']:.3f}s | "
+          f"ciclos {r['ciclos_recuperados']}/{r['ciclos_reais']}")
 
 
-def avaliar_transicoes(pred_times, true_times, tolerance_s=1.0):
-    pred, true = sorted(pred_times), sorted(true_times)
-    used, tp, fp, errors = set(), 0, 0, []
-    for p in pred:
-        cand = [(i, abs(p - t)) for i, t in enumerate(true) if i not in used]
-        if not cand:
-            fp += 1; continue
-        i, d = min(cand, key=lambda x: x[1])
-        if d <= tolerance_s:
-            tp += 1; used.add(i); errors.append(d)
-        else:
-            fp += 1
-    fn = len(true) - len(used)
-    mae = float(np.mean(errors)) if errors else 0.0
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / (tp + fn) if (tp + fn) else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-
-    secao(f"AVALIAÇÃO DE TRANSIÇÕES (tol={tolerance_s}s)")
-    print(f"TP={tp} FP={fp} FN={fn} | Precisão={precision*100:.2f}% Revocação={recall*100:.2f}% "
-          f"F1={f1*100:.2f}% MAE={mae:.4f}s\n")
-    return {'tp': tp, 'fp': fp, 'fn': fn, 'precision': precision, 'recall': recall, 'f1': f1, 'mae_s': mae}
-
-
-def preparar_sequencias(dados, targets, tempo=None, seq_length=50, horizonte=1):
-    """Janela dados[i:i+seq] -> estado em i+seq-1+horizonte (o alvo nunca está na janela)."""
-    if horizonte < 1:
-        raise ValueError("horizonte deve ser >= 1")
-    X, y, idx = [], [], []
-    for i in range(len(dados) - seq_length - horizonte + 1):
-        alvo = i + seq_length - 1 + horizonte
-        X.append(dados[i:i + seq_length]); y.append(targets[alvo]); idx.append(alvo)
-    X = np.array(X).reshape(-1, seq_length, 1)
-    y = np.array(y)
-    idx = np.array(idx, dtype=int)
-    if tempo is not None:
-        return X, y, idx, np.array(tempo)[idx]
-    return X, y, idx
-
-
-def dividir_dados_brutos_cronologico(potencia, estados, tempo):
-    """Corte cronológico simples (60/20/20) — sem estratificação, sem shuffle."""
-    n = len(potencia)
-    n_tr, n_va = int(0.6 * n), int(0.2 * n)
-    return np.arange(0, n_tr), np.arange(n_tr, n_tr + n_va), np.arange(n_tr + n_va, n)
-
-
-def build_lstm_model(seq_length=50):
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=(seq_length, 1)),
-        Dropout(0.2),
-        LSTM(32),
-        Dropout(0.2),
-        Dense(16, activation='relu'),
-        Dropout(0.2),
-        Dense(1, activation='sigmoid'),
-    ])
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    return model
-
-
-def treinar_modelo(X_tr, y_tr, X_val, y_val, epochs=100, batch_size=32, patience=5, class_weights=None):
-    model = build_lstm_model(seq_length=X_tr.shape[1])
-    es = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True, verbose=1)
-    print(f"Treino: {X_tr.shape[0]} amostras | Val: {X_val.shape[0]} | Pesos: {class_weights}")
-    history = model.fit(X_tr, y_tr, validation_data=(X_val, y_val), epochs=epochs,
-                         batch_size=batch_size, class_weight=class_weights, callbacks=[es],
-                         shuffle=True, verbose=2)
-    return model, history
-
-
-def encontrar_limiar_otimo(model, X_val, y_val):
-    probs = model.predict(X_val, verbose=0).flatten()
-    melhor_f1, melhor_t = -1.0, 0.5
-    for t in np.linspace(0.1, 0.9, 81):
-        preds = (probs >= t).astype(int)
-        tp = np.sum((preds == 1) & (y_val == 1)); fp = np.sum((preds == 1) & (y_val == 0))
-        fn = np.sum((preds == 0) & (y_val == 1))
-        prec = tp / (tp + fp) if (tp + fp) else 0
-        rec = tp / (tp + fn) if (tp + fn) else 0
-        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
-        if f1 > melhor_f1:
-            melhor_f1, melhor_t = f1, t
-    print(f"✓ Limiar ótimo: {melhor_t:.2f} (F1-val={melhor_f1*100:.2f}%)")
-    return melhor_t
-
-
-def aplicar_debouncing_estados(previsoes, tempo, min_duracao=1.0):
-    """Rederiva os estados após filtrar pulsos curtos, preservando alternância estrita."""
-    prev = np.array(previsoes, copy=True).astype(int)
-    n = len(prev)
-    if n == 0:
-        return prev
-    idx0, estado = 0, prev[0]
-    for i in range(1, n):
-        if prev[i] != estado:
-            if tempo[i] - tempo[idx0] < min_duracao:
-                prev[idx0:i] = 1 - estado
-            estado, idx0 = prev[i], i
-    if tempo[-1] - tempo[idx0] < min_duracao:
-        prev[idx0:] = prev[max(0, idx0 - 1)]
-    return prev
-
-
-def detectar_transicoes(previsoes, tempo, min_duracao=1.0):
-    suave = aplicar_debouncing_estados(previsoes, tempo, min_duracao)
-    idx = np.where(np.diff(suave) != 0)[0] + 1
-    if len(idx) == 0:
-        print("⚠️ Nenhuma transição detectada.")
-        return np.array([]), np.array([]), np.array([])
-    print(f"✓ {len(idx)} transições detectadas.")
-    return idx, np.array(tempo)[idx], suave[idx]
-
-
-def extrair_ciclos(tempos, estados):
-    ciclos, i = [], 0
-    while i + 2 < len(tempos):
-        if estados[i] == 1 and estados[i + 1] == 0 and estados[i + 2] == 1:
-            ciclos.append({
-                'ciclo_num': len(ciclos) + 1,
-                't0': float(tempos[i]), 't1': float(tempos[i + 1]), 't2': float(tempos[i + 2]),
-                'duracao_acordado': float(tempos[i + 1] - tempos[i]),
-                'duracao_dormindo': float(tempos[i + 2] - tempos[i + 1]),
-                'duracao_ciclo': float(tempos[i + 2] - tempos[i]),
-            })
-            i += 2
-        else:
-            i += 1
-    print(f"✓ {len(ciclos)} ciclos extraídos.\n")
-    return ciclos
-
-
-def analisar_ciclos(ciclos):
-    if not ciclos:
-        return None
-    ac = np.array([c['duracao_acordado'] for c in ciclos])
-    do = np.array([c['duracao_dormindo'] for c in ciclos])
-    ci = np.array([c['duracao_ciclo'] for c in ciclos])
-    return {'num_ciclos': len(ciclos),
-            'duracao_acordado_media': float(np.mean(ac)), 'uniformidade_acordado': _calcular_cv_seguro(ac),
-            'duracao_dormindo_media': float(np.mean(do)), 'uniformidade_dormindo': _calcular_cv_seguro(do),
-            'duracao_ciclo_media': float(np.mean(ci)), 'uniformidade_ciclo': _calcular_cv_seguro(ci)}
-
-
-def obter_metricas_dict(y_real, y_pred):
-    r = classification_report(y_real, y_pred, target_names=['DORMINDO (0)', 'ACORDADO (1)'],
-                               output_dict=True, zero_division=0)
-    return {'accuracy': accuracy_score(y_real, y_pred), 'precision': r['ACORDADO (1)']['precision'],
-            'recall': r['ACORDADO (1)']['recall'], 'f1': r['ACORDADO (1)']['f1-score']}
-
-
-def gerar_metricas_classificacao(y_real, y_pred):
-    secao("RELATÓRIO DE CLASSIFICAÇÃO (LSTM)")
-    print(classification_report(y_real, y_pred, target_names=['DORMINDO (0)', 'ACORDADO (1)'], digits=4))
-    print(f"Acurácia: {accuracy_score(y_real, y_pred)*100:.2f}%")
-    print("Matriz de confusão:\n", confusion_matrix(y_real, y_pred), "\n")
-
-
-def avaliar_baseline_trivial(potencia_ultima, y_real, threshold, horizonte=1):
-    """Baseline de persistência: x[t-h] > limiar_otsu.
-
-    Usa só a última amostra da janela, ou seja, a mesma informação que o
-    LSTM recebe, e um limiar estimado sem rótulos. Usar x[t] > 100 mW seria
-    a própria regra de rotulagem (100% garantido, comparação sem sentido).
-    """
-    m = obter_metricas_dict(y_real, (np.asarray(potencia_ultima) > threshold).astype(int))
-    secao(f"BASELINE TRIVIAL (persistência): x[t-{horizonte}] > {threshold:.1f} mW (Otsu)")
-    print(f"Acurácia={m['accuracy']*100:.2f}% Precisão={m['precision']*100:.2f}% "
-          f"Revocação={m['recall']*100:.2f}% F1={m['f1']*100:.2f}%")
-    if m['accuracy'] >= 0.999:
-        print("⚠️ Baseline trivial ≥ 99.9%: com estes rótulos a tarefa é quase trivial; "
-              "ganho do LSTM sobre ele não é evidência de aprendizado útil.")
-    print()
-    return m
-
-
-def comparar_lstm_vs_trivial(lstm, trivial):
-    secao("LSTM vs. BASELINE TRIVIAL (nível de amostra)")
-    for chave, nome in [('accuracy', 'Acurácia'), ('precision', 'Precisão'),
-                         ('recall', 'Revocação'), ('f1', 'F1-Score')]:
-        d = lstm[chave]*100 - trivial[chave]*100
-        veredito = "✓ LSTM" if d > 0.01 else ("≈ empate" if abs(d) <= 0.01 else "✗ trivial")
-        print(f"{nome:<12} LSTM={lstm[chave]*100:6.2f}  Trivial={trivial[chave]*100:6.2f}  Δ={d:+.2f}pp ({veredito})")
-    print()
-
+# ---------- gráficos ----------
 
 def _eixo(ax, titulo, xlabel, ylabel, legenda=True):
     ax.set_title(titulo, fontweight="bold"); ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
@@ -316,141 +138,189 @@ def _eixo(ax, titulo, xlabel, ylabel, legenda=True):
 def plotar_historico(history):
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
     a1.plot(history.history['loss'], label='Treino'); a1.plot(history.history['val_loss'], label='Val')
-    _eixo(a1, 'Loss', 'Época', 'Loss')
+    _eixo(a1, 'Loss (LSTM)', 'Época', 'Loss')
     a2.plot(history.history['accuracy'], label='Treino'); a2.plot(history.history['val_accuracy'], label='Val')
-    _eixo(a2, 'Acurácia', 'Época', 'Acurácia')
+    _eixo(a2, 'Acurácia por amostra (LSTM)', 'Época', 'Acurácia')
     plt.tight_layout(); return fig
 
 
-def plotar_matriz_confusao(y_real, y_pred):
-    fig, ax = plt.subplots(figsize=(7, 5))
-    sns.heatmap(confusion_matrix(y_real, y_pred), annot=True, fmt='d', cmap='Blues', ax=ax,
-                xticklabels=['DORMINDO', 'ACORDADO'], yticklabels=['DORMINDO', 'ACORDADO'])
-    _eixo(ax, 'Matriz de Confusão - LSTM', 'Predito', 'Real', legenda=False)
+def plotar_previsoes_teste(tempo, potencia, ciclos_teste, preditores, margem_s=3.0):
+    """Zoom no 1º período ativo do teste: t0/t1 reais + estado previsto por cada modelo.
+
+    O zoom é para enxergar erros da ordem de décimos de segundo; numa janela
+    de vários ciclos (~300 s cada) todos os modelos pareceriam idênticos.
+    """
+    c = ciclos_teste[0]
+    a, b = np.searchsorted(tempo, [c['t0'] - margem_s, c['t1'] + margem_s])
+    t = tempo[a:b]
+    sel = [c]
+    fig, axes = plt.subplots(len(preditores) + 1, 1, figsize=(14, 2 + 1.1 * (len(preditores) + 1)),
+                             sharex=True, gridspec_kw={'height_ratios': [3] + [1] * len(preditores)})
+    axes[0].plot(t, potencia[a:b], '.-', linewidth=0.6, markersize=3, label='Potência')
+    for k, cor in (('t0', 'tab:red'), ('t1', 'tab:orange')):
+        axes[0].axvline(c[k], color=cor, linestyle='--', linewidth=1)
+    axes[0].set_title(f'Teste, ciclo {c.get("ciclo_id", "")}: t0 (vermelho) e t1 (laranja) reais × '
+                      'estado previsto por modelo', fontweight='bold')
+    axes[0].set_ylabel('mW'); axes[0].grid(True, linestyle='--', alpha=0.4)
+    estados_reais, _ = ciclos_para_estados(t, sel)
+    for ax, (nome, prever) in zip(axes[1:], preditores.items()):
+        ax.fill_between(t, 0, estados_reais, step='post', color='0.85', label='Real')
+        ax.step(t, prever(a, b), where='post', linewidth=1.2, label='Previsto')
+        ax.set_yticks([0, 1]); ax.set_yticklabels(['DORM', 'ACORD'], fontsize=7)
+        ax.set_ylabel(NOMES[nome], rotation=0, ha='right', va='center', fontsize=8)
+        ax.grid(True, linestyle='--', alpha=0.3)
+    axes[1].legend(loc='upper right', fontsize=7)
+    axes[-1].set_xlabel('Tempo decorrido (s)')
     plt.tight_layout(); return fig
 
 
-def plotar_ciclos_lstm(tempo, potencia, previsoes, ciclos, recorte=10000):
-    fig, (a1, a2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    lim = min(recorte, len(tempo))
-    a1.plot(tempo[:lim], potencia[:lim], linewidth=1.2, label="Potência"); _eixo(a1, "Potência (Teste)", "", "mW")
-    a2.plot(tempo[:lim], previsoes[:lim], linewidth=1, label="Previsão LSTM")
-    marcado = {'t0': False, 't1': False, 't2': False}
-    for c in ciclos:
-        if c['t2'] <= tempo[lim - 1]:
-            for k, (marker, cor, y) in zip(['t0', 't1', 't2'], [('o', 'green', 1), ('s', 'red', 0), ('^', 'blue', 1)]):
-                a2.plot(c[k], y, marker, color=cor, markersize=7, label=k if not marcado[k] else None)
-                marcado[k] = True
-    a2.set_yticks([0, 1]); a2.set_yticklabels(['DORMINDO', 'ACORDADO'])
-    _eixo(a2, "Transições t0/t1/t2", "Tempo (s)", "Estado")
+def plotar_heuristico(tempo, potencia, suave, ciclo):
+    """Zoom em um período ativo: sinal bruto × suavizado (mediana não afunda antes do degrau)."""
+    a, b = np.searchsorted(tempo, [ciclo['t0'] - 5, ciclo['t1'] + 5])
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.plot(tempo[a:b], potencia[a:b], alpha=0.5, linewidth=0.8, label='Bruta')
+    ax.plot(tempo[a:b], suave[a:b], linewidth=2, label='Suavizada (mediana)')
+    _eixo(ax, 'Fase 1 — detecção heurística (zoom em um período ativo)', 'Tempo decorrido (s)', 'mW')
     plt.tight_layout(); return fig
 
 
-def plotar_ciclos_heuristico(tempo, potencia, potencia_suave, recorte=10000):
-    fig, ax = plt.subplots(figsize=(14, 5))
-    lim = min(recorte, len(tempo))
-    ax.plot(tempo[:lim], potencia[:lim], alpha=0.4, label="Bruta")
-    ax.plot(tempo[:lim], potencia_suave[:lim], linewidth=2, label="Suavizada")
-    _eixo(ax, "Detecção Heurística", "Tempo (s)", "mW")
+def plotar_comparacao(tabela, tol_s):
+    """Duas métricas, dois gráficos (sem eixo duplo)."""
+    nomes = tabela['modelo'].tolist()
+    y = np.arange(len(nomes))
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 0.6 * len(nomes) + 2), sharey=True)
+    a1.barh(y, tabela['f1'] * 100, height=0.6, color='tab:blue')
+    for yi, v in zip(y, tabela['f1'] * 100):
+        a1.text(v, yi, f' {v:.1f}%', va='center', fontsize=8)
+    a1.set_yticks(y); a1.set_yticklabels(nomes); a1.invert_yaxis()
+    a1.set_xlim(0, 110); _eixo(a1, f'F1 de eventos (tolerância ±{tol_s}s)', '%', '', legenda=False)
+    h = 0.25
+    for i, (k, cor) in enumerate((('mae_t0_s', 'tab:red'), ('mae_t1_s', 'tab:orange'), ('mae_t2_s', 'tab:purple'))):
+        a2.barh(y + (i - 1) * h, tabela[k], height=h, color=cor, label=k.split('_')[1])
+    _eixo(a2, 'Erro médio absoluto por instante (menor = melhor)', 'segundos', '')
     plt.tight_layout(); return fig
-
-
-def exibir_tabela_ciclos(ciclos, stats, limite=20):
-    if not ciclos or not stats:
-        print("⚠️ Sem ciclos suficientes.\n"); return
-    secao(f"RESUMO DOS CICLOS ({stats['num_ciclos']} encontrados)")
-    for c in ciclos[:limite]:
-        print(f"#{c['ciclo_num']:<4} t0={c['t0']:.2f} t1={c['t1']:.2f} t2={c['t2']:.2f} "
-              f"acordado={c['duracao_acordado']:.2f}s dormindo={c['duracao_dormindo']:.2f}s")
-    if len(ciclos) > limite:
-        print(f"... (+{len(ciclos) - limite} ciclos omitidos)")
-    print(f"\nMédia acordado={stats['duracao_acordado_media']:.2f}s (CV={stats['uniformidade_acordado']:.2f}%) | "
-          f"dormindo={stats['duracao_dormindo_media']:.2f}s (CV={stats['uniformidade_dormindo']:.2f}%)\n")
 
 
 def salvar_graficos(figs, output_dir, formato="pdf", dpi=150):
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     for nome, fig in figs.items():
-        fig.savefig(os.path.join(output_dir, f"{ts}_{nome}.{formato}"), format=formato, dpi=dpi, bbox_inches='tight')
+        fig.savefig(os.path.join(output_dir, f"{ts}_{nome}.{formato}"), format=formato, dpi=dpi,
+                    bbox_inches='tight')
+        plt.close(fig)
 
 
-def main():
-    configurar_sementes(42)
-    args = parse_args()
-    LIMIAR_MW = 100.0
+# ---------- pipeline ----------
 
-    if not os.path.exists(args.csv_path):
-        print(f"⚠️ {args.csv_path} não encontrado — usando série sintética.")
-        t = np.linspace(0, 1000, 10000)
-        p = np.where((t % 100) > 80, 250 + np.random.normal(0, 5, len(t)), 10 + np.random.normal(0, 2, len(t)))
-        df = pd.DataFrame({"Delta-T_[ms]": np.ones(len(t)) * 100, "Consumed_[mW]": p})
+def main(argv=None):
+    args = parse_args(argv)
+    os.makedirs(args.output_dir, exist_ok=True)
+    tol = args.tolerancia
+
+    # Fase 0
+    ciclos_sint = None
+    if os.path.exists(args.csv_path):
+        df, tempo, potencia = carregar_csv(args.csv_path)
     else:
-        df = eda_inspect_csv(args.csv_path)
+        print(f"⚠️ {args.csv_path} não encontrado — usando série sintética com gabarito conhecido.")
+        df, tempo, potencia, ciclos_sint = gerar_serie_sintetica(n_ciclos=args.sintetico_ciclos)
+    eda(df, tempo, potencia)
+    figs = {"00_eda": plotar_eda(tempo, potencia)}
+    salvar_eda_html(tempo, potencia, os.path.join(args.output_dir, 'html', 'eda_interativo.html'))
 
-    df["Tempo_Decorrido_[s]"] = df["Delta-T_[ms]"].cumsum() / 1000.0 if "Delta-T_[ms]" in df.columns else np.arange(len(df))
-    df["Estado_Real"] = rotular_estados(df["Consumed_[mW]"].values, LIMIAR_MW)
+    # Fase 2 (vem antes da modelagem: define treino/validação/teste)
+    ciclos, origem = obter_rotulos(args, tempo, potencia, ciclos_sint)
+    estados, _ = ciclos_para_estados(tempo, ciclos)
+    c_tr, c_va, c_te = dividir_ciclos(ciclos)
+    idx_tr, idx_va = indices_dos_ciclos(tempo, c_tr), indices_dos_ciclos(tempo, c_va)
+    print(f"Ciclos: treino={len(c_tr)} | validação={len(c_va)} | teste={len(c_te)} (corte cronológico)")
+    stats = analisar_ciclos([{**c, 'duracao_acordado': c['t1'] - c['t0'], 'duracao_dormindo': c['t2'] - c['t1'],
+                              'duracao_ciclo': c['t2'] - c['t0']} for c in ciclos])
+    print(f"Rótulos: acordado={stats['duracao_acordado_media']:.2f}s (CV={stats['uniformidade_acordado']:.1f}%) | "
+          f"dormindo={stats['duracao_dormindo_media']:.2f}s (CV={stats['uniformidade_dormindo']:.1f}%)\n")
 
-    potencia = df["Consumed_[mW]"].values.astype(float)
-    estados = df["Estado_Real"].values.astype(int)
-    tempo = df["Tempo_Decorrido_[s]"].values.astype(float)
+    # Fase 1
+    limiar = estimar_limiar_otsu(potencia[idx_tr])
+    secao("FASE 1: BASELINES SEM ML")
+    print(f"Limiar de Otsu (só potência do treino, sem rótulos): {limiar:.1f} mW")
+    est_heur, suave = estados_heuristico(potencia, tempo, limiar, min_duracao_s=MIN_DURACAO_S)
+    preditores = {}
+    if 'limiar' in args.modelos:
+        bruto = (potencia > limiar).astype(int)
+        preditores['limiar'] = lambda a, b: bruto[a:b]
+    if 'heuristico' in args.modelos:
+        preditores['heuristico'] = lambda a, b: est_heur[a:b]
+        figs["04_heuristico"] = plotar_heuristico(tempo, potencia, suave, c_te[0])
 
-    idx_tr, idx_va, idx_te = dividir_dados_brutos_cronologico(potencia, estados, tempo)
+    def f1_val(prever):
+        return avaliar_preditor(prever, tempo, estados, c_va, tol)[0]['f1']
 
-    # limiar dos baselines: estimado só no treino e sem olhar os rótulos
-    limiar_otsu = estimar_limiar_otsu(potencia[idx_tr])
-    print(f"Limiar do rótulo: {LIMIAR_MW:.1f} mW | limiar Otsu (baselines, treino): {limiar_otsu:.1f} mW\n")
+    # Fase 3
+    if {'logreg', 'rf'} & set(args.modelos):
+        from modelos import calcular_features, ClassificadorJanela
+        secao("FASE 3: CLASSIFICAÇÃO PONTO A PONTO (features de janela)")
+        feats = calcular_features(potencia)
+        for tipo in ('logreg', 'rf'):
+            if tipo in args.modelos:
+                t_ini = time.time()
+                preditores[tipo] = ClassificadorJanela(tipo).treinar(feats, estados, idx_tr).prever
+                print(f"✓ {NOMES[tipo]} treinado em {time.time() - t_ini:.1f}s")
 
-    scaler = MinMaxScaler()
-    pot_tr = scaler.fit_transform(potencia[idx_tr].reshape(-1, 1)).flatten()
-    pot_va = scaler.transform(potencia[idx_va].reshape(-1, 1)).flatten()
-    pot_te = scaler.transform(potencia[idx_te].reshape(-1, 1)).flatten()
+    # Fase 4
+    if {'hmm', 'ruptures'} & set(args.modelos):
+        from modelos import HMMDoisEstados, Changepoints
+        secao("FASE 4: HMM E CHANGEPOINT DETECTION")
+        if 'hmm' in args.modelos:
+            t_ini = time.time()
+            hmm = HMMDoisEstados().treinar(potencia, tempo, estados, idx_tr)
+            est_hmm = hmm.prever(0, len(potencia))
+            preditores['hmm'] = lambda a, b: est_hmm[a:b]
+            print(f"✓ HMM treinado em {time.time() - t_ini:.1f}s "
+                  f"(médias: {np.exp(hmm.hmm.means_.ravel()).round(1)} mW)")
+        if 'ruptures' in args.modelos:
+            cp = Changepoints(limiar).ajustar_penalidade(potencia, idx_tr, f1_val)
+            print(f"✓ ruptures: penalidade escolhida na validação = {cp.pen}")
+            preditores['ruptures'] = cp.prever
 
-    SEQ, H = 50, args.horizonte
-    X_tr, y_tr, _, _ = preparar_sequencias(pot_tr, estados[idx_tr], tempo[idx_tr], SEQ, H)
-    X_va, y_va, _, _ = preparar_sequencias(pot_va, estados[idx_va], tempo[idx_va], SEQ, H)
-    X_te, y_te, alvo_te, tempo_te = preparar_sequencias(pot_te, estados[idx_te], tempo[idx_te], SEQ, H)
-    potencia_te = potencia[idx_te][alvo_te]
-    potencia_te_ultima = potencia[idx_te][alvo_te - H]  # última amostra da janela de entrada
-    estados_te_real = estados[idx_te][alvo_te]
+    # Fase 6
+    lstm = None
+    if 'lstm' in args.modelos:
+        from lstm import ModeloLSTM, configurar_sementes
+        secao("FASE 6: LSTM")
+        configurar_sementes(42)
+        lstm = ModeloLSTM(epocas=args.epocas, passo_treino=args.lstm_passo).treinar(potencia, estados, idx_tr, idx_va)
+        preditores['lstm'] = lstm.prever
+        figs["01_historico_lstm"] = plotar_historico(lstm.history)
 
-    classes = np.unique(y_tr)
-    pesos = compute_class_weight('balanced', classes=classes, y=y_tr)
-    dict_pesos = dict(zip(classes, pesos))
+    # Fase 5
+    secao(f"FASE 5: AVALIAÇÃO POR EVENTO NO TESTE ({len(c_te)} ciclos, tolerância ±{tol}s)")
+    linhas = []
+    for nome, prever in preditores.items():
+        r, _ = avaliar_preditor(prever, tempo, estados, c_te, tol)
+        imprimir_resultado(NOMES[nome], r, tol)
+        linhas.append({'modelo': NOMES[nome], **r})
+    tabela = pd.DataFrame(linhas).sort_values(['f1', 'mae_t0_s'], ascending=[False, True])
+    cols = ['modelo', 'f1', 'precisao', 'revocacao', 'f1_subida', 'f1_descida', 'mae_t0_s', 'mae_t1_s',
+            'mae_t2_s', 'ciclos_recuperados', 'ciclos_reais', 'acuracia_amostra', 'f1_amostra']
+    tabela = tabela[cols]
+    tabela['rotulos'] = origem
+    caminho_tab = os.path.join(args.output_dir, 'comparacao_modelos.csv')
+    tabela.to_csv(caminho_tab, index=False, float_format='%.4f')
 
-    model, history = treinar_modelo(X_tr, y_tr, X_va, y_va, class_weights=dict_pesos)
-    limiar_otimo = encontrar_limiar_otimo(model, X_va, y_va)
-    previsoes = (model.predict(X_te, verbose=0).flatten() >= limiar_otimo).astype(int)
+    secao("COMPARAÇÃO FINAL (ordenada por F1 de eventos)")
+    with pd.option_context('display.width', 200, 'display.max_columns', 20):
+        print(tabela.drop(columns=['rotulos']).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print(f"\nAcurácia por amostra aparece só como referência: ~2% das amostras são ACORDADO,\n"
+          f"então ela fica perto de 100% mesmo para modelos que erram os instantes.")
+    if origem == 'provisorio':
+        print("\n⚠️ Lembrete: rótulos PROVISÓRIOS (limiar 100 mW). Os números acima não valem como resultado.")
 
-    gerar_metricas_classificacao(y_te, previsoes)
-    metricas_lstm = obter_metricas_dict(y_te, previsoes)
-    metricas_trivial = avaliar_baseline_trivial(potencia_te_ultima, y_te, threshold=limiar_otsu, horizonte=H)
-    comparar_lstm_vs_trivial(metricas_lstm, metricas_trivial)
-
-    ciclos_heur, potencia_suave = detectar_ciclos_heuristico(potencia_te, tempo_te, threshold=limiar_otsu)
-    _, tempos_lstm, estados_lstm = detectar_transicoes(previsoes, tempo_te)
-    ciclos_lstm = extrair_ciclos(tempos_lstm, estados_lstm)
-    _, tempos_reais, _ = detectar_transicoes(estados_te_real, tempo_te)
-
-    print("\n[DUAL-PATH] LSTM:")
-    avaliar_transicoes(tempos_lstm, tempos_reais, tolerance_s=2.0)
-
-    # t0 (liga) + t1 (desliga) — usar só t0 travava o recall em 50%
-    tempos_heur = sorted([c['t0'] for c in ciclos_heur] + [c['t1'] for c in ciclos_heur])
-    print("[DUAL-PATH] Heurístico:")
-    avaliar_transicoes(tempos_heur, tempos_reais, tolerance_s=2.0)
-
-    if ciclos_lstm:
-        exibir_tabela_ciclos(ciclos_lstm, analisar_ciclos(ciclos_lstm))
-
-    figs = {
-        "01_historico_treinamento": plotar_historico(history),
-        "02_matriz_confusao": plotar_matriz_confusao(y_te, previsoes),
-        "03_ciclos_lstm": plotar_ciclos_lstm(tempo_te, potencia_te, previsoes, ciclos_lstm),
-        "04_ciclos_heuristico": plotar_ciclos_heuristico(tempo_te, potencia_te, potencia_suave),
-    }
+    figs["02_previsoes_teste"] = plotar_previsoes_teste(tempo, potencia, c_te, preditores)
+    figs["03_comparacao_modelos"] = plotar_comparacao(tabela, tol)
+    figs["05_rotulos_teste"] = plotar_ciclos_rotulados(tempo, potencia, c_te, f"Rótulos ({origem}) — teste")
     salvar_graficos(figs, os.path.join(args.output_dir, "pdf"))
-    print("\n✓ Pipeline concluído.")
+    print(f"\n✓ Pipeline concluído. Tabela: {caminho_tab} | gráficos: {os.path.join(args.output_dir, 'pdf')}")
+    return tabela
 
 
 if __name__ == "__main__":

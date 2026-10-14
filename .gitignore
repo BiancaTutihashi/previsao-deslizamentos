@@ -1,9 +1,11 @@
 data/
 *.csv
+!rotulos/*.csv
 resultados/
 *.pdf
-__pycache__/
-*.keras
 !resultados_atualizados
+__pycache__/
+.pytest_cache/
+*.keras
 *.ogg
 etc
