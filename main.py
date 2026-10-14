@@ -32,6 +32,8 @@ def parse_args():
     p.add_argument('--csv-path', default=os.environ.get(
         'MONDESA_CSV_PATH', '/kaggle/input/datasets/biancatutihashi/experiment4-0/experiment4-0.CSV'))
     p.add_argument('--output-dir', default=os.environ.get('MONDESA_OUTPUT_DIR', './resultados'))
+    p.add_argument('--horizonte', type=int, default=1,
+                   help='quantas amostras à frente o estado é previsto (1 = próxima amostra)')
     args, _ = p.parse_known_args()
     return args
 
@@ -61,6 +63,31 @@ def eda_inspect_csv(path):
         print(f"Passo temporal ({time_col}): média={np.mean(diffs):.4f}s, CV={cv:.2f}% ({status})")
     print()
     return df
+
+
+def rotular_estados(potencia, limiar_mw=100.0):
+    """Rótulo ARTIFICIAL: limiar físico fixo sobre o próprio sinal (ver README)."""
+    return (np.asarray(potencia, dtype=float) > limiar_mw).astype(int)
+
+
+def estimar_limiar_otsu(potencia, bins=256):
+    """Limiar não supervisionado (Otsu) estimado só com a potência, sem ver os rótulos.
+
+    Os baselines usam este limiar em vez do limiar do rótulo; se usassem o
+    mesmo (100 mW), reproduziriam a regra de rotulagem e acertariam 100%
+    por construção.
+    """
+    hist, bordas = np.histogram(np.asarray(potencia, dtype=float), bins=bins)
+    centros = (bordas[:-1] + bordas[1:]) / 2
+    w0 = np.cumsum(hist); w1 = w0[-1] - w0
+    soma0 = np.cumsum(hist * centros); soma1 = soma0[-1] - soma0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        var_entre = w0 * w1 * (soma0 / w0 - soma1 / w1) ** 2
+    var_entre = np.nan_to_num(var_entre[:-1], nan=-1.0)
+    # entre modos bem separados há um platô de máximo (bins vazios): usa o meio dele
+    k = np.flatnonzero(np.isclose(var_entre, var_entre.max()))
+    k = k[k - k[0] == np.arange(len(k))]  # só o primeiro bloco contíguo
+    return float(bordas[(k[0] + k[-1]) // 2 + 1])
 
 
 def detectar_ciclos_heuristico(potencia, tempo, threshold=100.0, min_duracao_s=0.5, window_len=51, polyorder=3):
@@ -117,10 +144,14 @@ def avaliar_transicoes(pred_times, true_times, tolerance_s=1.0):
     return {'tp': tp, 'fp': fp, 'fn': fn, 'precision': precision, 'recall': recall, 'f1': f1, 'mae_s': mae}
 
 
-def preparar_sequencias(dados, targets, tempo=None, seq_length=50):
+def preparar_sequencias(dados, targets, tempo=None, seq_length=50, horizonte=1):
+    """Janela dados[i:i+seq] -> estado em i+seq-1+horizonte (o alvo nunca está na janela)."""
+    if horizonte < 1:
+        raise ValueError("horizonte deve ser >= 1")
     X, y, idx = [], [], []
-    for i in range(len(dados) - seq_length):
-        X.append(dados[i:i + seq_length]); y.append(targets[i + seq_length]); idx.append(i + seq_length)
+    for i in range(len(dados) - seq_length - horizonte + 1):
+        alvo = i + seq_length - 1 + horizonte
+        X.append(dados[i:i + seq_length]); y.append(targets[alvo]); idx.append(alvo)
     X = np.array(X).reshape(-1, seq_length, 1)
     y = np.array(y)
     idx = np.array(idx, dtype=int)
@@ -247,12 +278,21 @@ def gerar_metricas_classificacao(y_real, y_pred):
     print("Matriz de confusão:\n", confusion_matrix(y_real, y_pred), "\n")
 
 
-def avaliar_baseline_trivial(potencia, y_real, threshold=100.0):
-    """Baseline x[t] > threshold, sem modelo — o comparador que a revisão pedia."""
-    m = obter_metricas_dict(y_real, (potencia > threshold).astype(int))
-    secao(f"BASELINE TRIVIAL: x[t] > {threshold:.1f} mW")
+def avaliar_baseline_trivial(potencia_ultima, y_real, threshold, horizonte=1):
+    """Baseline de persistência: x[t-h] > limiar_otsu.
+
+    Usa só a última amostra da janela, ou seja, a mesma informação que o
+    LSTM recebe, e um limiar estimado sem rótulos. Usar x[t] > 100 mW seria
+    a própria regra de rotulagem (100% garantido, comparação sem sentido).
+    """
+    m = obter_metricas_dict(y_real, (np.asarray(potencia_ultima) > threshold).astype(int))
+    secao(f"BASELINE TRIVIAL (persistência): x[t-{horizonte}] > {threshold:.1f} mW (Otsu)")
     print(f"Acurácia={m['accuracy']*100:.2f}% Precisão={m['precision']*100:.2f}% "
-          f"Revocação={m['recall']*100:.2f}% F1={m['f1']*100:.2f}%\n")
+          f"Revocação={m['recall']*100:.2f}% F1={m['f1']*100:.2f}%")
+    if m['accuracy'] >= 0.999:
+        print("⚠️ Baseline trivial ≥ 99.9%: com estes rótulos a tarefa é quase trivial; "
+              "ganho do LSTM sobre ele não é evidência de aprendizado útil.")
+    print()
     return m
 
 
@@ -349,7 +389,7 @@ def main():
         df = eda_inspect_csv(args.csv_path)
 
     df["Tempo_Decorrido_[s]"] = df["Delta-T_[ms]"].cumsum() / 1000.0 if "Delta-T_[ms]" in df.columns else np.arange(len(df))
-    df["Estado_Real"] = (df["Consumed_[mW]"] > LIMIAR_MW).astype(int)
+    df["Estado_Real"] = rotular_estados(df["Consumed_[mW]"].values, LIMIAR_MW)
 
     potencia = df["Consumed_[mW]"].values.astype(float)
     estados = df["Estado_Real"].values.astype(int)
@@ -357,17 +397,22 @@ def main():
 
     idx_tr, idx_va, idx_te = dividir_dados_brutos_cronologico(potencia, estados, tempo)
 
+    # limiar dos baselines: estimado só no treino e sem olhar os rótulos
+    limiar_otsu = estimar_limiar_otsu(potencia[idx_tr])
+    print(f"Limiar do rótulo: {LIMIAR_MW:.1f} mW | limiar Otsu (baselines, treino): {limiar_otsu:.1f} mW\n")
+
     scaler = MinMaxScaler()
     pot_tr = scaler.fit_transform(potencia[idx_tr].reshape(-1, 1)).flatten()
     pot_va = scaler.transform(potencia[idx_va].reshape(-1, 1)).flatten()
     pot_te = scaler.transform(potencia[idx_te].reshape(-1, 1)).flatten()
 
-    SEQ = 50
-    X_tr, y_tr, _, _ = preparar_sequencias(pot_tr, estados[idx_tr], tempo[idx_tr], SEQ)
-    X_va, y_va, _, _ = preparar_sequencias(pot_va, estados[idx_va], tempo[idx_va], SEQ)
-    X_te, y_te, _, tempo_te = preparar_sequencias(pot_te, estados[idx_te], tempo[idx_te], SEQ)
-    potencia_te = potencia[idx_te][SEQ:]
-    estados_te_real = estados[idx_te][SEQ:]
+    SEQ, H = 50, args.horizonte
+    X_tr, y_tr, _, _ = preparar_sequencias(pot_tr, estados[idx_tr], tempo[idx_tr], SEQ, H)
+    X_va, y_va, _, _ = preparar_sequencias(pot_va, estados[idx_va], tempo[idx_va], SEQ, H)
+    X_te, y_te, alvo_te, tempo_te = preparar_sequencias(pot_te, estados[idx_te], tempo[idx_te], SEQ, H)
+    potencia_te = potencia[idx_te][alvo_te]
+    potencia_te_ultima = potencia[idx_te][alvo_te - H]  # última amostra da janela de entrada
+    estados_te_real = estados[idx_te][alvo_te]
 
     classes = np.unique(y_tr)
     pesos = compute_class_weight('balanced', classes=classes, y=y_tr)
@@ -379,10 +424,10 @@ def main():
 
     gerar_metricas_classificacao(y_te, previsoes)
     metricas_lstm = obter_metricas_dict(y_te, previsoes)
-    metricas_trivial = avaliar_baseline_trivial(potencia_te, y_te, threshold=LIMIAR_MW)
+    metricas_trivial = avaliar_baseline_trivial(potencia_te_ultima, y_te, threshold=limiar_otsu, horizonte=H)
     comparar_lstm_vs_trivial(metricas_lstm, metricas_trivial)
 
-    ciclos_heur, potencia_suave = detectar_ciclos_heuristico(potencia_te, tempo_te, threshold=LIMIAR_MW)
+    ciclos_heur, potencia_suave = detectar_ciclos_heuristico(potencia_te, tempo_te, threshold=limiar_otsu)
     _, tempos_lstm, estados_lstm = detectar_transicoes(previsoes, tempo_te)
     ciclos_lstm = extrair_ciclos(tempos_lstm, estados_lstm)
     _, tempos_reais, _ = detectar_transicoes(estados_te_real, tempo_te)
