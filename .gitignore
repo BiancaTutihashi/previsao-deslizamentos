@@ -1,9 +1,5 @@
-data/
+.git/
 *.csv
 todos-resultados/
-*.pdf
-__pycache__/
-*.keras
 resultados_pdf/
 *.ogg
-etc
