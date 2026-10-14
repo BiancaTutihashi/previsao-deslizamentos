@@ -368,7 +368,7 @@ def exibir_tabela_ciclos(ciclos, stats, limite=20):
           f"dormindo={stats['duracao_dormindo_media']:.2f}s (CV={stats['uniformidade_dormindo']:.2f}%)\n")
 
 
-def salvar_graficos(figs, output_dir, formato="png", dpi=150):
+def salvar_graficos(figs, output_dir, formato="pdf", dpi=150):
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     for nome, fig in figs.items():
@@ -449,7 +449,7 @@ def main():
         "03_ciclos_lstm": plotar_ciclos_lstm(tempo_te, potencia_te, previsoes, ciclos_lstm),
         "04_ciclos_heuristico": plotar_ciclos_heuristico(tempo_te, potencia_te, potencia_suave),
     }
-    salvar_graficos(figs, os.path.join(args.output_dir, "png"))
+    salvar_graficos(figs, os.path.join(args.output_dir, "pdf"))
     print("\n✓ Pipeline concluído.")
 
 
