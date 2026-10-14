@@ -9,3 +9,4 @@ __pycache__/
 *.keras
 *.ogg
 etc
+mondesa_kaggle.py

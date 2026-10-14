@@ -317,7 +317,8 @@ def main(argv=None):
 
     figs["02_previsoes_teste"] = plotar_previsoes_teste(tempo, potencia, c_te, preditores)
     figs["03_comparacao_modelos"] = plotar_comparacao(tabela, tol)
-    figs["05_rotulos_teste"] = plotar_ciclos_rotulados(tempo, potencia, c_te, f"Rótulos ({origem}) — teste")
+    # conferência: as linhas t0/t1/t2 precisam cair em cima dos degraus de potência
+    figs["05_rotulos"] = plotar_ciclos_rotulados(tempo, potencia, ciclos, f"Rótulos ({origem}) — conferência")
     salvar_graficos(figs, os.path.join(args.output_dir, "pdf"))
     print(f"\n✓ Pipeline concluído. Tabela: {caminho_tab} | gráficos: {os.path.join(args.output_dir, 'pdf')}")
     return tabela

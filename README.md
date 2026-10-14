@@ -67,7 +67,7 @@ Saídas em `--output-dir`:
 - `pdf/*_02_previsoes_teste.pdf`: zoom num período ativo do teste, com o estado previsto por cada modelo;
 - `pdf/*_03_comparacao_modelos.pdf`: F1 de eventos e MAE de t0/t1/t2 por modelo;
 - `pdf/*_04_heuristico.pdf`: sinal bruto × suavizado;
-- `pdf/*_05_rotulos_teste.pdf`: ciclos de teste com os rótulos;
+- `pdf/*_05_rotulos.pdf`: os ciclos rotulados (até 13), para conferir se t0/t1/t2 caem nos degraus;
 - `html/eda_interativo.html`: série com zoom.
 
 Testes: `pytest -v`.
@@ -172,3 +172,21 @@ de Edge AI.
    (hiperparâmetros) e `mlflow`/`wandb` (registro de experimentos).
 4. Datasets mais difíceis; se os modelos simples deixarem de bastar, testar
    1D-CNN/TCN (por exemplo com `tsai`).
+
+## Arquivo único para o Kaggle
+
+Para rodar no Kaggle sem subir a pasta inteira, gere um `.py` autossuficiente
+(com os rótulos de `rotulos/rotulos_ciclos.csv` embutidos):
+
+```bash
+python gerar_arquivo_unico.py . mondesa_kaggle.py
+```
+
+No notebook (com Internet ligada):
+
+```python
+!pip install -q hmmlearn ruptures
+!python mondesa_kaggle.py --csv-path /kaggle/input/.../experiment4-0.CSV --output-dir /kaggle/working/resultados
+```
+
+O arquivo gerado não é versionado. Para mudar o código, edite os módulos e gere de novo.
