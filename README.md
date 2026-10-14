@@ -175,18 +175,22 @@ de Edge AI.
 
 ## Arquivo único para o Kaggle
 
-Para rodar no Kaggle sem subir a pasta inteira, gere um `.py` autossuficiente
-(com os rótulos de `rotulos/rotulos_ciclos.csv` embutidos):
+Para rodar no Kaggle sem subir a pasta inteira, gere um `.py` autossuficiente,
+com os rótulos de `rotulos/rotulos_ciclos.csv` embutidos:
 
 ```bash
-python gerar_arquivo_unico.py . mondesa_kaggle.py
+python gerar_arquivo_unico.py            # completo -> mondesa_kaggle.py (~1000 linhas)
+python gerar_arquivo_unico.py --enxuto   # enxuto   -> mondesa_kaggle_enxuto.py (~850 linhas)
 ```
+
+A versão enxuta tira o que não roda no Kaggle (série sintética, rótulos
+provisórios, gráficos HTML) e as docstrings. Os resultados são os mesmos.
 
 No notebook (com Internet ligada):
 
 ```python
 !pip install -q hmmlearn ruptures
-!python mondesa_kaggle.py --csv-path /kaggle/input/.../experiment4-0.CSV --output-dir /kaggle/working/resultados
+!python mondesa_kaggle_enxuto.py --csv-path /kaggle/input/.../experiment4-0.CSV --output-dir /kaggle/working/resultados
 ```
 
-O arquivo gerado não é versionado. Para mudar o código, edite os módulos e gere de novo.
+Os arquivos gerados não são versionados. Para mudar o código, edite os módulos e gere de novo.
