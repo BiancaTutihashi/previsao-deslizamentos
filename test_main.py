@@ -14,7 +14,7 @@ from dados import gerar_serie_sintetica
 from heuristico import estimar_limiar_otsu, suavizar, detectar_ciclos_heuristico
 from avaliacao import metricas_eventos, avaliar_modelo, eventos_reais
 from rotulagem import carregar_rotulos, salvar_rotulos, validar_ciclos, rotulos_provisorios
-from main import dividir_ciclos, indices_dos_ciclos, main
+from main import dividir_ciclos, indices_dos_ciclos, main, remover_sem_dependencia
 
 
 @pytest.fixture(scope='module')
@@ -240,3 +240,12 @@ def test_pipeline_ponta_a_ponta_sem_lstm(tmp_path):
     assert (tabela['f1'] > 0.9).all()
     assert (tmp_path / 'comparacao_modelos.csv').exists()
     assert len(list((tmp_path / 'pdf').glob('*.pdf'))) == 5
+
+
+def test_modelo_sem_biblioteca_e_pulado_com_aviso(monkeypatch, capsys):
+    import importlib.util
+    original = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, 'find_spec',
+                        lambda nome, *a, **k: None if nome == 'hmmlearn' else original(nome, *a, **k))
+    assert remover_sem_dependencia(['heuristico', 'hmm', 'rf']) == ['heuristico', 'rf']
+    assert 'pip install -q hmmlearn' in capsys.readouterr().out

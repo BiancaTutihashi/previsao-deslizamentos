@@ -33,6 +33,21 @@ NOMES = {'limiar': 'Limiar simples (Otsu)', 'heuristico': 'Heurístico (mediana+
          'ruptures': 'ruptures (KernelCPD)', 'lstm': 'LSTM'}
 MIN_DURACAO_S = 1.0   # pulsos mais curtos que isso são ruído (o período ativo dura ~6,5 s)
 MARGEM_S = 10.0       # contexto extra em volta de cada trecho avaliado
+DEPENDENCIAS = {'hmm': 'hmmlearn', 'ruptures': 'ruptures', 'lstm': 'tensorflow'}
+
+
+def remover_sem_dependencia(modelos):
+    """Pula (com aviso) os modelos cuja biblioteca não está instalada, em vez de quebrar no meio."""
+    import importlib.util
+    disponiveis = []
+    for m in modelos:
+        lib = DEPENDENCIAS.get(m)
+        if lib and importlib.util.find_spec(lib) is None:
+            print(f"⚠️ {NOMES[m]} pulado: a biblioteca '{lib}' não está instalada "
+                  f"(no Kaggle: ligue a Internet e rode `!pip install -q {lib}`).")
+        else:
+            disponiveis.append(m)
+    return disponiveis
 
 
 def parse_args(argv=None):
@@ -214,6 +229,7 @@ def salvar_graficos(figs, output_dir, formato="pdf", dpi=150):
 
 def main(argv=None):
     args = parse_args(argv)
+    args.modelos = remover_sem_dependencia(args.modelos)
     os.makedirs(args.output_dir, exist_ok=True)
     tol = args.tolerancia
 
