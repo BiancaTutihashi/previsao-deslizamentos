@@ -5,7 +5,8 @@ Convenções usadas em todo o projeto:
 - t0 = instante em que o ciclo começa (DORMINDO -> ACORDADO);
 - t1 = fim do período ativo (ACORDADO -> DORMINDO);
 - t2 = fim do período dormindo = t0 do ciclo seguinte;
-- o tempo de uma transição é o da primeira amostra no estado novo.
+- t0/t2 = tempo da primeira amostra ACORDADO; t1 = tempo da última amostra
+  ACORDADO (mesma convenção dos rótulos do coorientador).
 """
 import numpy as np
 
@@ -44,7 +45,10 @@ def detectar_transicoes(previsoes, tempo, min_duracao=1.0, verbose=True):
         print(f"✓ {len(idx)} transições detectadas." if len(idx) else "⚠️ Nenhuma transição detectada.")
     if len(idx) == 0:
         return np.array([], dtype=int), np.array([]), np.array([], dtype=int)
-    return idx, np.asarray(tempo)[idx], suave[idx]
+    novos = suave[idx]
+    # subida: primeira amostra acordada; descida (t1): última amostra acordada
+    tempos = np.asarray(tempo)[np.where(novos == 1, idx, idx - 1)]
+    return idx, tempos, novos
 
 
 def extrair_ciclos(tempos, estados, verbose=True):
@@ -79,7 +83,7 @@ def estados_para_ciclos(estados, tempo, min_duracao=1.0):
 
 
 def ciclos_para_estados(tempo, ciclos):
-    """Rótulo ponto a ponto a partir de ciclos (1 em [t0, t1)) e máscara de amostras rotuladas.
+    """Rótulo ponto a ponto a partir de ciclos (1 em [t0, t1]) e máscara de amostras rotuladas.
 
     Só as amostras dentro de algum ciclo [t0, t2) são consideradas rotuladas:
     a rotulagem manual cobre um subconjunto do dataset.
@@ -88,7 +92,8 @@ def ciclos_para_estados(tempo, ciclos):
     estados = np.zeros(len(tempo), dtype=int)
     rotulado = np.zeros(len(tempo), dtype=bool)
     for c in ciclos:
-        i0, i1, i2 = np.searchsorted(tempo, [c['t0'], c['t1'], c['t2']])
+        i0, i2 = np.searchsorted(tempo, [c['t0'], c['t2']])
+        i1 = np.searchsorted(tempo, c['t1'], side='right')  # t1 é a última amostra acordada
         estados[i0:i1] = 1
         rotulado[i0:i2] = True
     return estados, rotulado

@@ -72,15 +72,20 @@ class ClassificadorJanela:
 class HMMDoisEstados:
     """Fase 4: HMM gaussiano com 2 estados ocultos sobre log(potência).
 
-    As probabilidades de transição e as médias iniciais vêm dos rótulos de
-    treino; o EM ajusta só as gaussianas. Se o EM também ajustasse as
-    transições, ele aprenderia a explicar cada pico isolado de ruído
-    (~100 mW durante o sono) como um "acordado" curtíssimo. Pelo mesmo
-    motivo a entrada passa pelo mesmo filtro de mediana da heurística.
+    HMM supervisado: transições, médias e variâncias são estimadas direto
+    dos rótulos de treino e a decodificação é por Viterbi. Não usamos EM:
+
+    - com as transições livres, o EM aprende a explicar cada pico isolado de
+      ruído (~100 mW durante o sono) como um "acordado" curtíssimo;
+    - a potência do sensor é quantizada (dormindo só aparece 45,5 / 51,9 /
+      58,4 mW) e o EM colapsa a variância do sono num único valor; aí 45 ou
+      58 mW passam a parecer "acordado". Por isso há também um piso de variância.
+
+    A entrada passa pelo mesmo filtro de mediana da heurística.
     """
 
-    def __init__(self, n_iter=30, seed=42):
-        self.n_iter, self.seed = n_iter, seed
+    def __init__(self, var_min=0.01):
+        self.var_min = var_min  # em log(mW)²: desvio de ~10% da potência
 
     def treinar(self, potencia, tempo, estados, idx_treino):
         from hmmlearn.hmm import GaussianHMM
@@ -88,17 +93,17 @@ class HMMDoisEstados:
         x = np.log(np.clip(suavizar(potencia, tempo), 1e-3, None)).reshape(-1, 1)
         self.x = x
         xt, yt = x[idx_treino], estados[idx_treino]
-        hmm = GaussianHMM(n_components=2, covariance_type='diag', n_iter=self.n_iter,
-                          random_state=self.seed, init_params='', params='mc')
+        hmm = GaussianHMM(n_components=2, covariance_type='diag', init_params='', params='')
+        hmm.n_features = 1
         hmm.startprob_ = np.array([0.5, 0.5])
         p_sai = 1.0 / max(1, np.mean(yt == 0) * len(yt) / max(1, np.sum(np.diff(yt) == 1)))
         p_volta = 1.0 / max(1, np.mean(yt == 1) * len(yt) / max(1, np.sum(np.diff(yt) == -1)))
         hmm.transmat_ = np.array([[1 - p_sai, p_sai], [p_volta, 1 - p_volta]])
         hmm.means_ = np.array([[xt[yt == 0].mean()], [xt[yt == 1].mean()]])
-        hmm.covars_ = np.array([[xt[yt == 0].var() + 1e-4], [xt[yt == 1].var() + 1e-4]])
-        hmm.fit(xt)
+        hmm.covars_ = np.array([[max(xt[yt == 0].var(), self.var_min)],
+                                [max(xt[yt == 1].var(), self.var_min)]])
         self.hmm = hmm
-        self.estado_acordado = int(np.argmax(hmm.means_[:, 0]))
+        self.estado_acordado = 1
         return self
 
     def prever(self, a, b):

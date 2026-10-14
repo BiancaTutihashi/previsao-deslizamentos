@@ -73,6 +73,37 @@ def test_ciclos_para_estados_e_volta(serie):
         assert r['t0'] == pytest.approx(c['t0']) and r['t1'] == pytest.approx(c['t1'])
 
 
+def test_convencao_t1_e_a_ultima_amostra_acordada():
+    """Mesma convenção dos rótulos do coorientador (conferida no experiment4-0):
+    t0 = 1ª amostra acordada, t1 = ÚLTIMA amostra acordada, t2 = 1ª acordada do ciclo seguinte."""
+    tempo = np.arange(12) * 0.05
+    potencia = np.array([52, 52, 353, 161, 161, 52, 52, 52, 52, 340, 161, 52], dtype=float)
+    ciclos = estados_para_ciclos((potencia > 100).astype(int), tempo, min_duracao=0.0)
+    assert ciclos[0]['t0'] == tempo[2] and ciclos[0]['t1'] == tempo[4] and ciclos[0]['t2'] == tempo[9]
+    estados, _ = ciclos_para_estados(tempo, ciclos)
+    assert list(estados[2:5]) == [1, 1, 1] and estados[5] == 0  # [t0, t1] inclusive
+
+
+def test_hmm_tolera_potencia_quantizada():
+    """Regressão: no dado real o sono só vale 45,5/51,9/58,4 mW; o EM colapsava a variância
+    e 45 ou 58 mW viravam 'acordado'."""
+    from modelos import HMMDoisEstados
+    rng = np.random.default_rng(0)
+    tempo = np.arange(60000) * 0.05
+    # treino: sono quase sempre 51,9 (o filtro de mediana apaga os desvios isolados);
+    # depois: sequências de 58,4 mW que sobrevivem ao filtro, como no trecho de teste real
+    potencia = np.full(len(tempo), 51.9)
+    for i in rng.choice(np.arange(30000, 60000 - 5), size=200, replace=False):
+        potencia[i:i + 6] = 58.4
+    for t0 in np.arange(100, 2900, 300):
+        # acordado: platô de ~161 mW com rajadas de 250–350 mW (gaussiana larga)
+        i = np.searchsorted(tempo, t0); potencia[i:i + 130] = rng.choice([161.0, 250.0, 350.0], 130, p=[.6, .2, .2])
+    estados = (potencia > 100).astype(int)
+    hmm = HMMDoisEstados().treinar(potencia, tempo, estados, np.arange(30000))
+    pred = hmm.prever(30000, len(tempo))
+    assert np.sum(np.diff(pred) != 0) == np.sum(np.diff(estados[30000:]) != 0)
+
+
 def test_agrupar_ciclos_contiguos_separa_trechos():
     ciclos = [{'t0': 0, 't1': 1, 't2': 10}, {'t0': 10, 't1': 11, 't2': 20}, {'t0': 50, 't1': 51, 't2': 60}]
     assert [len(b) for b in agrupar_ciclos_contiguos(ciclos)] == [2, 1]

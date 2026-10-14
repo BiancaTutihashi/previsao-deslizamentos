@@ -276,7 +276,7 @@ def main(argv=None):
             est_hmm = hmm.prever(0, len(potencia))
             preditores['hmm'] = lambda a, b: est_hmm[a:b]
             print(f"✓ HMM treinado em {time.time() - t_ini:.1f}s "
-                  f"(médias: {np.exp(hmm.hmm.means_.ravel()).round(1)} mW)")
+                  f"(médias dos rótulos: {np.exp(hmm.hmm.means_.ravel()).round(1)} mW)")
         if 'ruptures' in args.modelos:
             cp = Changepoints(limiar).ajustar_penalidade(potencia, idx_tr, f1_val)
             print(f"✓ ruptures: penalidade escolhida na validação = {cp.pen}")

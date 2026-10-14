@@ -50,8 +50,8 @@ def gerar_serie_sintetica(n_ciclos=40, periodo_s=306.1, ativo_s=6.6, dt_s=0.057,
         n_rajada = max(2, int(0.4 / dt_s))
         potencia[i0:i1] = rng.normal(160, 6, i1 - i0)
         potencia[i0:i0 + n_rajada] = rng.uniform(250, 700, n_rajada)
-        # o gabarito usa o tempo da primeira amostra em cada estado (mesma convenção do resto)
-        ciclos.append({'ciclo_id': k + 1, 't0': float(tempo[i0]), 't1': float(tempo[i1]),
+        # gabarito: t0 = 1ª amostra acordada, t1 = última amostra acordada (convenção do projeto)
+        ciclos.append({'ciclo_id': k + 1, 't0': float(tempo[i0]), 't1': float(tempo[i1 - 1]),
                        't2': float(tempo[np.searchsorted(tempo, t2)])})
         t = t2
     ciclos = ciclos[:n_ciclos]
