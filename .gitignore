@@ -4,6 +4,6 @@ todos-resultados/
 *.pdf
 __pycache__/
 *.keras
-!resultados
+resultados_pdf/
 *.ogg
 etc
