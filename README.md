@@ -80,11 +80,9 @@ O mesmo arquivo serve para treinar **e** avaliar todos os modelos. A divisão é
 cronológica por ciclo: 60% treino, 20% validação e 20% teste.
 
 **Estado atual:** o arquivo tem os 13 ciclos do *chunk 12* (67612–71590 s),
-**transcritos da figura enviada pelo coorientador**. A transcrição é
-consistente (ativo = 6,62 ± 0,05 s, dormindo = 299,4 ± 0,15 s, t2 = t0 do ciclo
-seguinte), mas foi feita a partir de uma imagem. O ideal é trocar pelo arquivo
-original. Com 13 ciclos sobram só 2 ou 3 para teste, então vale rotular mais
-trechos.
+**transcritos da figura enviada pelo coorientador**. Os 39 instantes coincidem
+com amostras do CSV real (erro de 0 ms), então a transcrição está correta. Com
+13 ciclos sobram só 2 para teste, então vale rotular mais trechos.
 
 Para rotular mais trechos:
 
@@ -151,6 +149,53 @@ Todas as janelas são **causais** (só usam amostras até o instante t), como
 seria num nodo sensor em tempo real. Isso deixa o caminho aberto para a etapa
 de Edge AI.
 
+## Resultados no experiment4-0
+
+Rodado com o CSV real (1.293.244 amostras, ~71.700 s) e os 13 ciclos
+rotulados do chunk 12: 8 de treino, 3 de validação e 2 de teste. Os arquivos
+estão em `resultados_atualizados/` (tabela, PDFs e saída do terminal).
+
+**Os rótulos batem com o sinal.** Os 39 instantes rotulados (t0, t1, t2)
+coincidem exatamente com amostras do CSV, com erro de 0 ms. A convenção do
+coorientador é: t0 = primeira amostra acordada, t1 = **última** amostra
+acordada, t2 = t0 do ciclo seguinte. O código segue a mesma convenção.
+
+| Modelo | F1 eventos (±1 s) | MAE t0 | MAE t1 | MAE t2 | Ciclos |
+|---|---|---|---|---|---|
+| Limiar simples (Otsu) | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| Heurístico (mediana+Otsu) | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| Regressão Logística | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| Random Forest | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| HMM 2 estados | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| ruptures (KernelCPD) | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+| LSTM | 100% | 0,000 s | 0,000 s | 0,000 s | 2/2 |
+
+**Como interpretar.** Todos os modelos acertam os instantes no nível da
+amostra, inclusive o limiar mais simples. Isso não é vazamento de rótulo: os
+rótulos vêm de fora do código. O motivo é que este dataset é fácil, como o
+coorientador previu:
+
+- qualquer limiar fixo entre 60 e 140 mW, aplicado à potência bruta,
+  reproduz os 13 ciclos rotulados com precisão de milissegundo;
+- no dataset inteiro, a heurística encontra 233 ciclos, todos regulares
+  (acordado = 6,59 ± 0,07 s, dormindo = 299,38 ± 0,16 s), sem nenhum ciclo fora
+  do padrão.
+
+Pelo critério do roadmap ("um modelo de ML só se justifica se superar a regra
+simples"), **no experiment4-0 a Fase 1 já resolve o problema** e não há margem
+para os modelos de ML mostrarem vantagem. Com só 2 ciclos de teste, a tabela
+também não serve para diferenciar os modelos. O próximo passo é ir para
+datasets mais difíceis.
+
+Duas observações do dado real que mudaram o código:
+
+- a potência é **quantizada** (dormindo só aparece 45,5, 51,9 ou 58,4 mW). O
+  EM do HMM colapsava a variância do sono e gerava falsos "acordado" (F1 de 56%).
+  Agora o HMM é estimado direto dos rótulos, com piso de variância;
+- o passo entre amostras é irregular (47–52 ms na maior parte, ~270 ms às vezes e
+  um buraco de 11 s no começo). Por isso as durações mínimas do código são em
+  segundos, não em número de amostras.
+
 ## Histórico
 
 - A versão anterior usava rótulos tirados do limiar de 100 mW e um baseline com
@@ -160,14 +205,15 @@ de Edge AI.
 - A opção `--horizonte` (prever N amostras à frente) foi removida. O objetivo
   do projeto é identificar t0/t1/t2 na série, não prever o estado futuro. Ela
   só existia para contornar a circularidade dos rótulos antigos.
-- `resultados_atualizados/` guarda os gráficos da versão antiga (classificação
-  por amostra) para referência.
+- Os gráficos da versão antiga (classificação por amostra) estão em
+  `resultados_atualizados/versao_antiga_classificacao_por_amostra/`.
 
 ## Próximos passos
 
-1. Substituir a transcrição pelo arquivo original de rótulos do coorientador e
-   rotular mais trechos (algumas dezenas de ciclos).
-2. Rodar o pipeline completo no `experiment4-0` (Kaggle) e registrar a tabela.
+1. Passar para datasets mais difíceis: o `experiment4-0` já é resolvido pela
+   regra simples. Rotular alguns trechos de cada um com `rotulagem.py`.
+2. Se possível, pegar com o coorientador o arquivo original dos rótulos
+   (os atuais foram transcritos da figura, embora batam 100% com o CSV).
 3. Ferramentas de apoio quando houver mais modelos e datasets: `optuna`
    (hiperparâmetros) e `mlflow`/`wandb` (registro de experimentos).
 4. Datasets mais difíceis; se os modelos simples deixarem de bastar, testar
