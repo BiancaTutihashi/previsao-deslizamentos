@@ -1,0 +1,8 @@
+modelo,f1,precisao,revocacao,f1_subida,f1_descida,mae_t0_s,mae_t1_s,mae_t2_s,ciclos_recuperados,ciclos_reais,acuracia_amostra,f1_amostra,rotulos
+Limiar simples (Otsu),1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+Heurístico (mediana+Otsu),1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+Regressão Logística,1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+Random Forest,1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+HMM 2 estados,1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+ruptures (KernelCPD),1.0000,1.0000,1.0000,1.0000,1.0000,0.0000,0.0000,0.0000,2,2,1.0000,1.0000,arquivo
+LSTM,1.0000,1.0000,1.0000,1.0000,1.0000,0.1545,0.6585,0.1820,2,2,0.9978,0.9502,arquivo
