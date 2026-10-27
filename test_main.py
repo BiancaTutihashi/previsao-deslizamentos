@@ -249,3 +249,19 @@ def test_modelo_sem_biblioteca_e_pulado_com_aviso(monkeypatch, capsys):
                         lambda nome, *a, **k: None if nome == 'hmmlearn' else original(nome, *a, **k))
     assert remover_sem_dependencia(['heuristico', 'hmm', 'rf']) == ['heuristico', 'rf']
     assert 'pip install -q hmmlearn' in capsys.readouterr().out
+
+
+def test_carrega_formato_bruto_do_registrador(tmp_path):
+    """Formato dos exp8/11/12/15: 4 colunas inteiras sem cabeçalho (Δt ms, V µV, I nA invertida, ?)."""
+    from dados import carregar_csv
+    caminho = tmp_path / 'bruto.csv'
+    caminho.write_text('0000000198,0005064268,-0010270141,0000025931\n'
+                       '47,5064268,-10270141,25931\n'
+                       '48,0,-10270141,25931\n'              # tensão 0: descartada
+                       '47,5064268,2147483648,25931\n'       # corrente saturada: descartada
+                       '52,5064268,-100000000,25931\n')
+    df, tempo, potencia = carregar_csv(str(caminho))
+    assert len(potencia) == 3  # a 1ª linha (lida como cabeçalho) volta a ser amostra
+    assert potencia[0] == pytest.approx(52.01, abs=0.01)  # 5,064 V × 10,27 mA
+    assert potencia[2] == pytest.approx(506.4, abs=0.1)
+    assert tempo[0] == pytest.approx(0.198) and tempo[-1] == pytest.approx(0.198 + 0.047 + 0.048 + 0.047 + 0.052)

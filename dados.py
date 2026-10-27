@@ -14,9 +14,42 @@ def secao(titulo):
     print("=" * 80); print(titulo); print("=" * 80)
 
 
+COLUNAS_BRUTAS = ["Delta-T_[ms]", "Tensao_[uV]", "Corrente_[nA]", "Coluna4"]
+SATURADO = 2**31 - 1  # leituras de corrente no limite do int32 são falhas do registrador
+
+
+def _eh_numero(texto):
+    try:
+        float(texto)
+        return True
+    except ValueError:
+        return False
+
+
 def carregar_csv(path):
-    """Lê o CSV do experimento e devolve (df, tempo_s, potencia_mW)."""
+    """Lê o CSV do experimento e devolve (df, tempo_s, potencia_mW).
+
+    Aceita dois formatos:
+    - processado (experiment4-0): colunas `Delta-T_[ms]` e `Consumed_[mW]`;
+    - bruto do registrador (exp8, 11, 12, 15): 4 colunas inteiras sem cabeçalho,
+      Δt [ms], tensão [µV], corrente [nA] (sinal invertido) e uma quarta coluna
+      não usada (parece temperatura em m°C). Potência = V × (−I) × 1e-12 mW.
+      Linhas com tensão 0 ou corrente saturada são descartadas.
+    """
     df = pd.read_csv(path)
+    if len(df.columns) == 4 and all(_eh_numero(c) for c in df.columns):
+        # sem cabeçalho: o que o pandas tomou por nomes é a primeira amostra
+        primeira = pd.DataFrame([[float(c) for c in df.columns]], columns=COLUNAS_BRUTAS)
+        df.columns = COLUNAS_BRUTAS
+        df = pd.concat([primeira, df], ignore_index=True)
+        v, i = df["Tensao_[uV]"].to_numpy(float), df["Corrente_[nA]"].to_numpy(float)
+        invalida = (v <= 0) | (np.abs(i) >= SATURADO)
+        if invalida.any():
+            print(f"⚠️ {int(invalida.sum())} leituras inválidas (tensão 0 ou corrente saturada) descartadas.")
+        tempo = df["Delta-T_[ms]"].cumsum().to_numpy(dtype=float) / 1000.0
+        df["Consumed_[mW]"] = v * (-i) * 1e-12
+        df, tempo = df[~invalida].reset_index(drop=True), tempo[~invalida]
+        return df, tempo, df["Consumed_[mW]"].to_numpy(dtype=float)
     if "Delta-T_[ms]" in df.columns:
         tempo = df["Delta-T_[ms]"].cumsum().to_numpy(dtype=float) / 1000.0
     else:
