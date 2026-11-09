@@ -21,11 +21,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from ciclos import (ciclos_para_estados, estados_para_eventos, estados_para_ciclos,
-                    agrupar_ciclos_contiguos, analisar_ciclos)
+                    agrupar_ciclos_contiguos, analisar_ciclos, medidas_ciclo)
 from dados import secao, carregar_csv, gerar_serie_sintetica, eda, plotar_eda, salvar_eda_html
 from heuristico import estimar_limiar_otsu, estados_heuristico
 from rotulagem import carregar_rotulos, rotulos_provisorios, salvar_rotulos, plotar_ciclos_rotulados
-from avaliacao import avaliar_modelo, metricas_amostra
+from avaliacao import avaliar_modelo, metricas_amostra, avaliar_estados
+from modelos import ClassificadorCiclos
 
 MODELOS = ['limiar', 'heuristico', 'logreg', 'rf', 'hmm', 'ruptures', 'lstm']
 NOMES = {'limiar': 'Limiar simples (Otsu)', 'heuristico': 'Heurístico (mediana+Otsu)',
@@ -33,6 +34,7 @@ NOMES = {'limiar': 'Limiar simples (Otsu)', 'heuristico': 'Heurístico (mediana+
          'ruptures': 'ruptures (KernelCPD)', 'lstm': 'LSTM'}
 MIN_DURACAO_S = 1.0   # pulsos mais curtos que isso são ruído (o período ativo dura ~6,5 s)
 MARGEM_S = 10.0       # contexto extra em volta de cada trecho avaliado
+JANELAS_HEURISTICA = (0.0, 0.15, 0.3)  # filtro de mediana testado na validação (0 = sem filtro)
 DEPENDENCIAS = {'hmm': 'hmmlearn', 'ruptures': 'ruptures', 'lstm': 'tensorflow'}
 
 
@@ -59,6 +61,9 @@ def parse_args(argv=None):
     p.add_argument('--output-dir', default=os.environ.get('MONDESA_OUTPUT_DIR', './resultados'))
     p.add_argument('--tolerancia', type=float, default=1.0,
                    help='janela de tolerância (s) para contar um evento como acerto')
+    p.add_argument('--lacuna', type=float, default=0.5,
+                   help='pulsos separados por menos que isso (s) formam um só período ativo '
+                        '(rajadas do Wi-Fi); 0,5 s é a regra dos rótulos do rastreamento')
     p.add_argument('--modelos', default=','.join(MODELOS), help=f'subconjunto de {",".join(MODELOS)}')
     p.add_argument('--epocas', type=int, default=100, help='máximo de épocas da LSTM (early stopping)')
     p.add_argument('--lstm-passo', type=int, default=1,
@@ -118,19 +123,29 @@ def trechos(tempo, ciclos, margem_s=MARGEM_S):
     return out
 
 
-def avaliar_preditor(prever, tempo, estados_reais, ciclos, tol_s):
-    """Roda `prever(a, b)` em cada trecho e aplica as métricas de evento (Fase 5)."""
+def avaliar_preditor(prever, tempo, estados_reais, ciclos, tol_s, lacuna_s=None, potencia=None,
+                     classificador=None):
+    """Roda `prever(a, b)` em cada trecho e aplica as métricas de evento (Fase 5).
+
+    Com `classificador` (e `potencia`), cada ciclo detectado também recebe um estado
+    (regular/falho) a partir das suas medidas, e entram as métricas de estado.
+    """
     subidas, descidas, ciclos_pred, y_real, y_pred = [], [], [], [], []
     _, rotulado = ciclos_para_estados(tempo, ciclos)
     for a, b in trechos(tempo, ciclos):
         est = prever(a, b)
-        s, d = estados_para_eventos(est, tempo[a:b], MIN_DURACAO_S)
+        s, d = estados_para_eventos(est, tempo[a:b], MIN_DURACAO_S, lacuna_s)
         subidas += list(s); descidas += list(d)
-        ciclos_pred += estados_para_ciclos(est, tempo[a:b], MIN_DURACAO_S)
+        ciclos_pred += estados_para_ciclos(est, tempo[a:b], MIN_DURACAO_S, lacuna_s)
         m = rotulado[a:b]
         y_real.append(estados_reais[a:b][m]); y_pred.append(est[m])
     r = avaliar_modelo(subidas, descidas, ciclos_pred, ciclos, tol_s)
     r.update(metricas_amostra(np.concatenate(y_real), np.concatenate(y_pred)))
+    if classificador is not None:
+        estados_prev = classificador.prever([medidas_ciclo(c, tempo, potencia) for c in ciclos_pred])
+        for c, e in zip(ciclos_pred, estados_prev):
+            c['estado'] = e
+        r.update(avaliar_estados(ciclos_pred, ciclos, tol_s))
     return r, ciclos_pred
 
 
@@ -139,6 +154,10 @@ def imprimir_resultado(nome, r, tol_s):
           f"[P={r['precisao']*100:.1f}% R={r['revocacao']*100:.1f}%] | "
           f"MAE t0={r['mae_t0_s']:.3f}s t1={r['mae_t1_s']:.3f}s t2={r['mae_t2_s']:.3f}s | "
           f"ciclos {r['ciclos_recuperados']}/{r['ciclos_reais']}")
+    if r.get('falhos_reais'):
+        print(f"    regular×falho: acurácia={r['acuracia_estado']*100:.1f}% | falhos: "
+              f"{r['falhos_detectados']}/{r['falhos_reais']} detectados, F1 falho={r['f1_falho']*100:.1f}% "
+              f"[P={r['precisao_falho']*100:.1f}% R={r['revocacao_falho']*100:.1f}%]")
 
 
 # ---------- gráficos ----------
@@ -246,6 +265,11 @@ def main(argv=None):
 
     # Fase 2 (vem antes da modelagem: define treino/validação/teste)
     ciclos, origem = obter_rotulos(args, tempo, potencia, ciclos_sint)
+    dentro = [c for c in ciclos if c['t0'] >= tempo[0] and c['t2'] <= tempo[-1]]
+    if len(dentro) < len(ciclos):
+        print(f"⚠️ {len(ciclos) - len(dentro)} ciclos rotulados caem fora dos dados "
+              f"({tempo[0]:.0f}–{tempo[-1]:.0f} s) e foram ignorados. O CSV pode estar incompleto.\n")
+        ciclos = dentro
     estados, _ = ciclos_para_estados(tempo, ciclos)
     c_tr, c_va, c_te = dividir_ciclos(ciclos)
     idx_tr, idx_va = indices_dos_ciclos(tempo, c_tr), indices_dos_ciclos(tempo, c_va)
@@ -259,17 +283,29 @@ def main(argv=None):
     limiar = estimar_limiar_otsu(potencia[idx_tr])
     secao("FASE 1: BASELINES SEM ML")
     print(f"Limiar de Otsu (só potência do treino, sem rótulos): {limiar:.1f} mW")
-    est_heur, suave = estados_heuristico(potencia, tempo, limiar, min_duracao_s=MIN_DURACAO_S)
     preditores = {}
+
+    def f1_val(prever):
+        return avaliar_preditor(prever, tempo, estados, c_va, tol, args.lacuna)[0]['f1']
+
     if 'limiar' in args.modelos:
         bruto = (potencia > limiar).astype(int)
         preditores['limiar'] = lambda a, b: bruto[a:b]
     if 'heuristico' in args.modelos:
+        # janela do filtro de mediana escolhida na validação: 0,3 s limpa ruído no exp4,
+        # mas apaga os pulsos de ~0,1 s das rajadas do Wi-Fi
+        melhor = None
+        for janela in JANELAS_HEURISTICA:
+            est, suave = estados_heuristico(potencia, tempo, limiar, janela_s=janela,
+                                            min_duracao_s=MIN_DURACAO_S, lacuna_s=args.lacuna)
+            f1 = f1_val(lambda a, b, est=est: est[a:b])
+            print(f"  heurística, janela {janela:.2f} s: F1-val={f1*100:.2f}%")
+            if melhor is None or f1 > melhor[0]:
+                melhor = (f1, janela, est, suave)
+        _, janela, est_heur, suave = melhor
+        print(f"✓ Heurística: janela escolhida na validação = {janela:.2f} s")
         preditores['heuristico'] = lambda a, b: est_heur[a:b]
         figs["04_heuristico"] = plotar_heuristico(tempo, potencia, suave, c_te[0])
-
-    def f1_val(prever):
-        return avaliar_preditor(prever, tempo, estados, c_va, tol)[0]['f1']
 
     # Fase 3
     if {'logreg', 'rf'} & set(args.modelos):
@@ -311,13 +347,22 @@ def main(argv=None):
     # Fase 5
     secao(f"FASE 5: AVALIAÇÃO POR EVENTO NO TESTE ({len(c_te)} ciclos, tolerância ±{tol}s)")
     linhas = []
+    # regular × falho: um só classificador de ciclos, treinado nos ciclos verdadeiros do treino
+    classificador = None
+    if any(c.get('estado', 'regular') == 'falho' for c in ciclos):
+        classificador = ClassificadorCiclos().treinar([medidas_ciclo(c, tempo, potencia) for c in c_tr],
+                                                      [c.get('estado', 'regular') for c in c_tr])
+        n_f = [sum(c.get('estado') == 'falho' for c in g) for g in (c_tr, c_va, c_te)]
+        print(f"Ciclos falhos: treino={n_f[0]} | validação={n_f[1]} | teste={n_f[2]}\n")
     for nome, prever in preditores.items():
-        r, _ = avaliar_preditor(prever, tempo, estados, c_te, tol)
+        r, _ = avaliar_preditor(prever, tempo, estados, c_te, tol, args.lacuna, potencia, classificador)
         imprimir_resultado(NOMES[nome], r, tol)
         linhas.append({'modelo': NOMES[nome], **r})
     tabela = pd.DataFrame(linhas).sort_values(['f1', 'mae_t0_s'], ascending=[False, True])
     cols = ['modelo', 'f1', 'precisao', 'revocacao', 'f1_subida', 'f1_descida', 'mae_t0_s', 'mae_t1_s',
             'mae_t2_s', 'ciclos_recuperados', 'ciclos_reais', 'acuracia_amostra', 'f1_amostra']
+    if classificador is not None:
+        cols += ['falhos_reais', 'falhos_detectados', 'acuracia_estado', 'f1_falho', 'precisao_falho', 'revocacao_falho']
     tabela = tabela[cols]
     tabela['rotulos'] = origem
     caminho_tab = os.path.join(args.output_dir, 'comparacao_modelos.csv')

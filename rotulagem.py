@@ -49,8 +49,18 @@ def validar_ciclos(ciclos):
     return ordenados
 
 
+ESTADOS = ('regular', 'falho')
+
+
 def carregar_rotulos(caminho):
+    """Lê `ciclo_id,t0,t1,t2[,revisado][,estado]` ou o formato do rastreamento do Pedro (`k,t0,t1,t2,estado`).
+
+    `estado` diz se o ciclo é regular ou falho; sem a coluna, todos são regulares.
+    Ciclos ausentes (k pulados) só deixam um buraco: os blocos contínuos são tratados à parte.
+    """
     df = pd.read_csv(caminho)
+    if 'ciclo_id' not in df.columns and 'k' in df.columns:
+        df = df.rename(columns={'k': 'ciclo_id'})
     faltando = [c for c in COLUNAS if c not in df.columns]
     if faltando:
         raise ValueError(f"{caminho}: faltam as colunas {faltando} (esperado {COLUNAS})")
@@ -59,8 +69,12 @@ def carregar_rotulos(caminho):
         df = df[df['revisado'].astype(int) == 1]
         if len(df) < n_antes:
             print(f"⚠️ {n_antes - len(df)} ciclos com revisado=0 ignorados em {caminho}")
-    ciclos = [{'ciclo_id': int(r.ciclo_id), 't0': float(r.t0), 't1': float(r.t1), 't2': float(r.t2)}
-              for r in df.itertuples()]
+    estados = df['estado'].astype(str).str.strip().str.lower() if 'estado' in df.columns else pd.Series('regular', index=df.index)
+    invalidos = sorted(set(estados) - set(ESTADOS))
+    if invalidos:
+        raise ValueError(f"{caminho}: estado desconhecido {invalidos} (esperado {ESTADOS})")
+    ciclos = [{'ciclo_id': int(r.ciclo_id), 't0': float(r.t0), 't1': float(r.t1), 't2': float(r.t2), 'estado': e}
+              for r, e in zip(df.itertuples(), estados)]
     return validar_ciclos(ciclos)
 
 

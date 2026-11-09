@@ -265,3 +265,56 @@ def test_carrega_formato_bruto_do_registrador(tmp_path):
     assert potencia[0] == pytest.approx(52.01, abs=0.01)  # 5,064 V × 10,27 mA
     assert potencia[2] == pytest.approx(506.4, abs=0.1)
     assert tempo[0] == pytest.approx(0.198) and tempo[-1] == pytest.approx(0.198 + 0.047 + 0.048 + 0.047 + 0.052)
+
+
+# ---------- rajadas, rótulos do rastreamento e regular × falho ----------
+
+def test_limpar_estados_junta_rajada_e_descarta_pulso_curto():
+    """Rajada do Wi-Fi: pulsos de 0,1 s com 0,3 s entre eles viram UM período ativo.
+    O debouncing antigo apagava cada pulso curto antes de juntar, e a rajada sumia."""
+    from ciclos import limpar_estados
+    tempo = np.arange(0, 60, 0.05)
+    e = np.zeros(len(tempo), dtype=int)
+    for ini in np.arange(10, 13, 0.4):                       # rajada de 10 a ~13 s
+        e[(tempo >= ini) & (tempo < ini + 0.1)] = 1
+    e[(tempo >= 30) & (tempo < 30.1)] = 1                     # pulso isolado: não é ciclo
+    e[(tempo >= 40) & (tempo < 42)] = 1; e[(tempo >= 43) & (tempo < 45)] = 1  # lacuna de 1 s: dois trechos
+    limpo = limpar_estados(e, tempo, lacuna_s=0.5, min_ativo_s=1.0)
+    assert np.sum(np.diff(limpo) == 1) == 3                   # rajada + dois trechos de 2 s
+    assert limpo[(tempo > 10.05) & (tempo < 12.8)].all()      # a rajada ficou inteira
+    assert not limpo[(tempo >= 29) & (tempo <= 31)].any()     # o pulso isolado sumiu
+
+
+def test_carrega_rotulos_do_rastreamento(tmp_path):
+    caminho = tmp_path / 'r.csv'
+    caminho.write_text('k,t0,t1,t2,estado\n0,10,17,310,regular\n1,310,314,610,falho\n4,1200,1207,1500,regular\n')
+    c = carregar_rotulos(str(caminho))
+    assert [x['ciclo_id'] for x in c] == [0, 1, 4] and [x['estado'] for x in c] == ['regular', 'falho', 'regular']
+    assert [len(b) for b in agrupar_ciclos_contiguos(c)] == [2, 1]   # k pulados = buraco entre blocos
+    caminho.write_text('k,t0,t1,t2,estado\n0,10,17,310,quebrado\n')
+    with pytest.raises(ValueError):
+        carregar_rotulos(str(caminho))
+
+
+def test_medidas_e_metricas_de_regular_falho():
+    from ciclos import medidas_ciclo
+    from avaliacao import avaliar_estados
+    tempo = np.arange(0, 20, 1.0)
+    potencia = np.full(20, 10.0); potencia[2:6] = 100.0; potencia[5] = 300.0
+    m = medidas_ciclo({'t0': 2.0, 't1': 5.0, 't2': 12.0}, tempo, potencia)
+    assert m['T_on'] == 3 and m['T'] == 10 and m['P_on'] == pytest.approx(150.0)
+    assert m['P_off'] == pytest.approx(10.0) and m['P_max'] == 300.0
+    reais = [{'t0': 0, 'estado': 'regular'}, {'t0': 300, 'estado': 'falho'},
+             {'t0': 600, 'estado': 'falho'}, {'t0': 900, 'estado': 'regular'}]
+    previstos = [{'t0': 0.2, 'estado': 'falho'}, {'t0': 300.1, 'estado': 'falho'}, {'t0': 900, 'estado': 'regular'}]
+    r = avaliar_estados(previstos, reais, tol_s=1.0)   # o falho de 600 s nem foi detectado
+    assert r['falhos_reais'] == 2 and r['falhos_detectados'] == 1
+    assert r['precisao_falho'] == pytest.approx(0.5) and r['revocacao_falho'] == pytest.approx(0.5)
+    assert r['acuracia_estado'] == pytest.approx(2 / 3)
+
+
+def test_classificador_de_ciclos_com_uma_classe_so():
+    from modelos import ClassificadorCiclos
+    medidas = [{'T_on': 6.6, 'T': 306, 'P_on': 160, 'P_off': 52, 'P_max': 700}] * 5
+    clf = ClassificadorCiclos().treinar(medidas, ['regular'] * 5)
+    assert list(clf.prever(medidas[:2])) == ['regular', 'regular']

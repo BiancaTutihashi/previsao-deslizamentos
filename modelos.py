@@ -149,3 +149,39 @@ class Changepoints:
 
     def prever(self, a, b):
         return self._segmentar(a, b, self.pen)
+
+
+class ClassificadorCiclos:
+    """Classifica cada ciclo como regular ou falho a partir das suas medidas (T_on, T, P_on, P_off, P_max).
+
+    Treinado nos ciclos VERDADEIROS do treino e aplicado aos ciclos que cada
+    modelo detectou no teste: um erro de detecção (t0/t1 no lugar errado)
+    distorce as medidas e aparece como erro de classificação, como deve ser.
+    Se o treino só tem uma classe (ex.: exp4, todos regulares), prevê essa classe.
+    """
+
+    def __init__(self, seed=42):
+        self.seed = seed
+
+    @staticmethod
+    def _x(medidas):
+        from ciclos import MEDIDAS
+        return np.nan_to_num(np.array([[m[k] for k in MEDIDAS] for m in medidas], dtype=float))
+
+    def treinar(self, medidas, estados):
+        estados = np.asarray(estados)
+        self.classes = np.unique(estados)
+        if len(self.classes) == 1:
+            self.modelo = None
+            return self
+        from sklearn.ensemble import RandomForestClassifier
+        self.modelo = RandomForestClassifier(n_estimators=200, min_samples_leaf=2, class_weight='balanced',
+                                             random_state=self.seed).fit(self._x(medidas), estados)
+        return self
+
+    def prever(self, medidas):
+        if not len(medidas):
+            return np.array([], dtype=object)
+        if self.modelo is None:
+            return np.full(len(medidas), self.classes[0], dtype=object)
+        return self.modelo.predict(self._x(medidas))

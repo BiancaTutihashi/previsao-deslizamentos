@@ -109,3 +109,31 @@ def metricas_amostra(y_real, y_pred):
     r = tp / (tp + fn) if (tp + fn) else 0.0
     return {'acuracia_amostra': float(np.mean(y_real == y_pred)) if len(y_real) else 0.0,
             'f1_amostra': 2 * p * r / (p + r) if (p + r) else 0.0}
+
+
+def avaliar_estados(ciclos_pred, ciclos_real, tol_s):
+    """Regular × falho: para cada ciclo real, o detectado com t0 a até `tol_s` tem o estado certo?
+
+    "Falho" é a classe positiva. Um falho real que nenhum modelo detectou conta como
+    falso negativo (o ciclo falho passou despercebido); ciclos detectados que não
+    casam com nenhum real já entram como falsos positivos nas métricas de evento.
+    """
+    t0_pred = np.array([c['t0'] for c in ciclos_pred])
+    tp = fp = fn = acertos = casados = falhos_achados = 0
+    for c in ciclos_real:
+        real = c.get('estado', 'regular')
+        j = int(np.argmin(np.abs(t0_pred - c['t0']))) if len(t0_pred) else -1
+        if j < 0 or abs(t0_pred[j] - c['t0']) > tol_s:
+            fn += real == 'falho'
+            continue
+        prev = ciclos_pred[j].get('estado', 'regular')
+        casados += 1; acertos += prev == real; falhos_achados += real == 'falho'
+        tp += prev == 'falho' and real == 'falho'
+        fp += prev == 'falho' and real != 'falho'
+        fn += prev != 'falho' and real == 'falho'
+    p = tp / (tp + fp) if (tp + fp) else 0.0
+    r = tp / (tp + fn) if (tp + fn) else 0.0
+    falhos = sum(c.get('estado', 'regular') == 'falho' for c in ciclos_real)
+    return {'falhos_reais': falhos, 'falhos_detectados': falhos_achados,
+            'acuracia_estado': acertos / casados if casados else float('nan'),
+            'precisao_falho': p, 'revocacao_falho': r, 'f1_falho': 2 * p * r / (p + r) if (p + r) else 0.0}

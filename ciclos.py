@@ -37,9 +37,41 @@ def aplicar_debouncing_estados(previsoes, tempo, min_duracao=1.0):
     return prev
 
 
-def detectar_transicoes(previsoes, tempo, min_duracao=1.0, verbose=True):
-    """Índices, tempos e estado novo de cada transição (após debouncing)."""
-    suave = aplicar_debouncing_estados(previsoes, tempo, min_duracao)
+def limpar_estados(estados, tempo, lacuna_s=0.5, min_ativo_s=1.0):
+    """Junta pulsos separados por menos de `lacuna_s` e depois descarta os mais curtos que `min_ativo_s`.
+
+    A ordem importa: no Wi-Fi o período ativo é uma rajada de pulsos de ~0,1 s.
+    Descartando os curtos primeiro (como faz `aplicar_debouncing_estados`), a
+    rajada inteira some; juntando primeiro, ela vira um período ativo só.
+    A lacuna é medida da última amostra de um pulso à primeira do seguinte, e
+    a duração de um período ativo de t0 a t1 (primeira e última amostra acordada).
+    """
+    e = np.asarray(estados).astype(int)
+    tempo = np.asarray(tempo, dtype=float)
+    borda = np.diff(np.concatenate(([0], e, [0])))
+    ini, fim = np.flatnonzero(borda == 1), np.flatnonzero(borda == -1) - 1  # fim = última amostra acordada
+    limpo = np.zeros(len(e), dtype=int)
+    if len(ini) == 0:
+        return limpo
+    junta = tempo[ini[1:]] - tempo[fim[:-1]] < lacuna_s
+    blocos_ini = np.concatenate(([ini[0]], ini[1:][~junta]))
+    blocos_fim = np.concatenate((fim[:-1][~junta], [fim[-1]]))
+    for a, b in zip(blocos_ini, blocos_fim):
+        if tempo[b] - tempo[a] >= min_ativo_s:
+            limpo[a:b + 1] = 1
+    return limpo
+
+
+def detectar_transicoes(previsoes, tempo, min_duracao=1.0, verbose=True, lacuna_s=None):
+    """Índices, tempos e estado novo de cada transição, depois da limpeza dos pulsos.
+
+    Com `lacuna_s` usa `limpar_estados` (junta pulsos próximos e descarta períodos
+    ativos curtos); sem ele, o debouncing antigo.
+    """
+    if lacuna_s is None:
+        suave = aplicar_debouncing_estados(previsoes, tempo, min_duracao)
+    else:
+        suave = limpar_estados(previsoes, tempo, lacuna_s, min_duracao)
     idx = np.where(np.diff(suave) != 0)[0] + 1
     if verbose:
         print(f"✓ {len(idx)} transições detectadas." if len(idx) else "⚠️ Nenhuma transição detectada.")
@@ -71,14 +103,14 @@ def extrair_ciclos(tempos, estados, verbose=True):
     return ciclos
 
 
-def estados_para_eventos(estados, tempo, min_duracao=1.0):
+def estados_para_eventos(estados, tempo, min_duracao=1.0, lacuna_s=None):
     """Tempos das subidas (t0/t2) e das descidas (t1) de uma série de estados."""
-    _, tempos, novos = detectar_transicoes(estados, tempo, min_duracao, verbose=False)
+    _, tempos, novos = detectar_transicoes(estados, tempo, min_duracao, verbose=False, lacuna_s=lacuna_s)
     return tempos[novos == 1], tempos[novos == 0]
 
 
-def estados_para_ciclos(estados, tempo, min_duracao=1.0):
-    _, tempos, novos = detectar_transicoes(estados, tempo, min_duracao, verbose=False)
+def estados_para_ciclos(estados, tempo, min_duracao=1.0, lacuna_s=None):
+    _, tempos, novos = detectar_transicoes(estados, tempo, min_duracao, verbose=False, lacuna_s=lacuna_s)
     return extrair_ciclos(tempos, novos, verbose=False)
 
 
@@ -120,3 +152,21 @@ def agrupar_ciclos_contiguos(ciclos, tol=1e-6):
         else:
             blocos.append([c])
     return blocos
+
+
+MEDIDAS = ('T_on', 'T', 'P_on', 'P_off', 'P_max')
+
+
+def medidas_ciclo(ciclo, tempo, potencia):
+    """Medidas de um ciclo (as mesmas grandezas do critério de falho do coorientador, e mais duas).
+
+    T_on = t1 − t0; T = t2 − t0; P_on = potência média em [t0, t1];
+    P_off = potência média em (t1, t2); P_max = pico em [t0, t1].
+    """
+    tempo = np.asarray(tempo, dtype=float)
+    i0, i2 = np.searchsorted(tempo, [ciclo['t0'], ciclo['t2']])
+    i1 = np.searchsorted(tempo, ciclo['t1'], side='right')  # t1 é a última amostra acordada
+    on, off = potencia[i0:max(i1, i0 + 1)], potencia[i1:max(i2, i1 + 1)]
+    return {'T_on': ciclo['t1'] - ciclo['t0'], 'T': ciclo['t2'] - ciclo['t0'],
+            'P_on': float(np.mean(on)), 'P_off': float(np.mean(off)) if len(off) else float('nan'),
+            'P_max': float(np.max(on))}

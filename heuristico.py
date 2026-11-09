@@ -13,7 +13,7 @@ os picos isolados de ruído sem deslocar nem deformar as bordas do degrau.
 import numpy as np
 from scipy.signal import medfilt
 
-from ciclos import aplicar_debouncing_estados, estados_para_ciclos
+from ciclos import aplicar_debouncing_estados, estados_para_ciclos, limpar_estados
 
 
 def estimar_limiar_otsu(potencia, bins=256):
@@ -32,23 +32,31 @@ def estimar_limiar_otsu(potencia, bins=256):
 
 
 def suavizar(potencia, tempo, janela_s=0.3):
-    """Filtro de mediana com janela ~janela_s segundos (nº ímpar de amostras)."""
+    """Filtro de mediana com janela ~janela_s segundos (nº ímpar de amostras); janela_s <= 0 = sem filtro."""
+    if janela_s <= 0:
+        return np.asarray(potencia, dtype=float).copy()
     dt = float(np.median(np.diff(tempo))) if len(tempo) > 1 else 1.0
     k = max(3, int(round(janela_s / dt)) | 1)
     k = min(k, len(potencia) - (1 - len(potencia) % 2))
     return medfilt(np.asarray(potencia, dtype=float), kernel_size=max(1, k))
 
 
-def estados_heuristico(potencia, tempo, limiar, janela_s=0.3, min_duracao_s=1.0):
-    """Estado ponto a ponto (0/1) segundo a regra heurística."""
+def estados_heuristico(potencia, tempo, limiar, janela_s=0.3, min_duracao_s=1.0, lacuna_s=None):
+    """Estado ponto a ponto (0/1) segundo a regra heurística.
+
+    Com `lacuna_s`, pulsos separados por menos que isso viram um período ativo só
+    (rajadas do Wi-Fi) antes do descarte dos períodos curtos; sem ele, o debouncing antigo.
+    """
     suave = suavizar(potencia, tempo, janela_s)
     estados = (suave > limiar).astype(int)
-    return aplicar_debouncing_estados(estados, tempo, min_duracao_s), suave
+    if lacuna_s is None:
+        return aplicar_debouncing_estados(estados, tempo, min_duracao_s), suave
+    return limpar_estados(estados, tempo, lacuna_s, min_duracao_s), suave
 
 
-def detectar_ciclos_heuristico(potencia, tempo, limiar, janela_s=0.3, min_duracao_s=1.0):
+def detectar_ciclos_heuristico(potencia, tempo, limiar, janela_s=0.3, min_duracao_s=1.0, lacuna_s=None):
     """Recebe a série e devolve a lista de ciclos (t0, t1, t2) detectados + sinal suavizado."""
     if len(potencia) <= 3:
         raise ValueError("Sinal muito curto")
-    estados, suave = estados_heuristico(potencia, tempo, limiar, janela_s, min_duracao_s)
-    return estados_para_ciclos(estados, tempo, min_duracao_s), suave
+    estados, suave = estados_heuristico(potencia, tempo, limiar, janela_s, min_duracao_s, lacuna_s)
+    return estados_para_ciclos(estados, tempo, min_duracao_s, lacuna_s), suave
