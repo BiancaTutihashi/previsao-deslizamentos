@@ -1,0 +1,81 @@
+⚠️ 86 leituras inválidas (tensão 0 ou corrente saturada) descartadas.
+================================================================================
+FASE 0: PRIMEIRO CONTATO COM OS DADOS
+================================================================================
+Linhas: 1761744 | Colunas: ['Delta-T_[ms]', 'Tensao_[uV]', 'Corrente_[nA]', 'Coluna4', 'Consumed_[mW]']
+Tipos: {'Delta-T_[ms]': 'float64', 'Tensao_[uV]': 'float64', 'Corrente_[nA]': 'float64', 'Coluna4': 'float64', 'Consumed_[mW]': 'float64'} | Nulos: 0
+Duração: 98784.3 s | passo médio=56.1 ms (CV=69.72% ⚠️ irregular)
+Potência: min=-29.4 mediana=364.7 max=6341.2 mW
+
+================================================================================
+FASE 2: RÓTULOS t0/t1/t2
+================================================================================
+✓ 302 ciclos rotulados lidos de rotulos/exp15-0_ciclos_rastreamento.csv
+
+Ciclos: treino=181 | validação=60 | teste=61 (corte cronológico)
+Rótulos: acordado=3.27s (CV=147.4%) | dormindo=300.08s (CV=1.8%)
+
+================================================================================
+FASE 1: BASELINES SEM ML
+================================================================================
+Limiar de Otsu (só potência do treino, sem rótulos): 1284.7 mW
+  heurística, janela 0.00 s: F1-val=74.90%
+  heurística, janela 0.15 s: F1-val=40.91%
+  heurística, janela 0.30 s: F1-val=6.25%
+✓ Heurística: janela escolhida na validação = 0.00 s
+================================================================================
+FASE 3: CLASSIFICAÇÃO PONTO A PONTO (features de janela)
+================================================================================
+✓ Regressão Logística treinado em 2.0s
+✓ Random Forest treinado em 3.8s
+================================================================================
+FASE 4: HMM E CHANGEPOINT DETECTION
+================================================================================
+✓ HMM treinado em 0.2s (médias dos rótulos: [364. 654.] mW)
+  ruptures pen=1: F1-val=42.29%
+  ruptures pen=3: F1-val=42.29%
+  ruptures pen=10: F1-val=40.46%
+  ruptures pen=30: F1-val=41.14%
+  ruptures pen=100: F1-val=41.62%
+✓ ruptures: penalidade escolhida na validação = 3
+================================================================================
+FASE 6: LSTM
+================================================================================
+LSTM — treino: 71071 janelas | val: 22809 | pesos: {np.int64(0): np.float64(0.505418936409279), np.int64(1): np.float64(46.634514435695536)}
+Restoring model weights from the end of the best epoch: 26.
+✓ Limiar de probabilidade: 0.90 (F1-val por amostra=87.00%)
+================================================================================
+FASE 5: AVALIAÇÃO POR EVENTO NO TESTE (61 ciclos, tolerância ±1.0s)
+================================================================================
+Ciclos falhos: treino=1 | validação=2 | teste=8
+
+Limiar simples (Otsu): F1 eventos (±1.0s)=79.17% [P=83.3% R=75.4%] | MAE t0=0.057s t1=0.343s t2=37.789s | ciclos 32/61
+    regular×falho: acurácia=87.5% | falhos: 3/8 detectados, F1 falho=26.7% [P=28.6% R=25.0%]
+Heurístico (mediana+Otsu): F1 eventos (±1.0s)=79.17% [P=83.3% R=75.4%] | MAE t0=0.057s t1=0.343s t2=37.789s | ciclos 32/61
+    regular×falho: acurácia=87.5% | falhos: 3/8 detectados, F1 falho=26.7% [P=28.6% R=25.0%]
+Regressão Logística: F1 eventos (±1.0s)=55.74% [P=57.6% R=54.0%] | MAE t0=0.011s t1=1.969s t2=25.033s | ciclos 8/61
+    regular×falho: acurácia=94.1% | falhos: 3/8 detectados, F1 falho=0.0% [P=0.0% R=0.0%]
+Random Forest: F1 eventos (±1.0s)=60.16% [P=61.7% R=58.7%] | MAE t0=0.008s t1=3.287s t2=19.215s | ciclos 11/61
+    regular×falho: acurácia=92.2% | falhos: 4/8 detectados, F1 falho=0.0% [P=0.0% R=0.0%]
+HMM 2 estados: F1 eventos (±1.0s)=70.22% [P=79.8% R=62.7%] | MAE t0=0.008s t1=29.961s t2=85.984s | ciclos 22/61
+    regular×falho: acurácia=79.1% | falhos: 2/8 detectados, F1 falho=0.0% [P=0.0% R=0.0%]
+ruptures (KernelCPD): F1 eventos (±1.0s)=51.69% [P=88.5% R=36.5%] | MAE t0=0.041s t1=0.770s t2=450.131s | ciclos 6/61
+    regular×falho: acurácia=34.8% | falhos: 0/8 detectados, F1 falho=0.0% [P=0.0% R=0.0%]
+LSTM: F1 eventos (±1.0s)=59.35% [P=60.8% R=57.9%] | MAE t0=0.008s t1=3.246s t2=19.215s | ciclos 11/61
+    regular×falho: acurácia=92.2% | falhos: 4/8 detectados, F1 falho=0.0% [P=0.0% R=0.0%]
+================================================================================
+COMPARAÇÃO FINAL (ordenada por F1 de eventos)
+================================================================================
+                   modelo    f1  precisao  revocacao  f1_subida  f1_descida  mae_t0_s  mae_t1_s  mae_t2_s  ciclos_recuperados  ciclos_reais  acuracia_amostra  f1_amostra  falhos_reais  falhos_detectados  acuracia_estado  f1_falho  precisao_falho  revocacao_falho
+    Limiar simples (Otsu) 0.792     0.833      0.754      0.839       0.741     0.057     0.343    37.789                  32            61             0.989       0.383             8                  3            0.875     0.267           0.286            0.250
+Heurístico (mediana+Otsu) 0.792     0.833      0.754      0.839       0.741     0.057     0.343    37.789                  32            61             0.993       0.640             8                  3            0.875     0.267           0.286            0.250
+            HMM 2 estados 0.702     0.798      0.627      0.810       0.587     0.008    29.961    85.984                  22            61             0.923       0.120             8                  2            0.791     0.000           0.000            0.000
+            Random Forest 0.602     0.617      0.587      0.866       0.319     0.008     3.287    19.215                  11            61             0.990       0.631             8                  4            0.922     0.000           0.000            0.000
+                     LSTM 0.593     0.608      0.579      0.866       0.303     0.008     3.246    19.215                  11            61             0.990       0.637             8                  4            0.922     0.000           0.000            0.000
+      Regressão Logística 0.557     0.576      0.540      0.873       0.220     0.011     1.969    25.033                   8            61             0.989       0.605             8                  3            0.941     0.000           0.000            0.000
+     ruptures (KernelCPD) 0.517     0.885      0.365      0.587       0.442     0.041     0.770   450.131                   6            61             0.989       0.389             8                  0            0.348     0.000           0.000            0.000
+
+Acurácia por amostra aparece só como referência: ~2% das amostras são ACORDADO,
+então ela fica perto de 100% mesmo para modelos que erram os instantes.
+
+✓ Pipeline concluído. Tabela: /tmp/claude-0/-home-user-previsao-deslizamentos/46241afb-272b-51da-97a8-256dd6093468/scratchpad/completo/exp15-0/comparacao_modelos.csv | gráficos: /tmp/claude-0/-home-user-previsao-deslizamentos/46241afb-272b-51da-97a8-256dd6093468/scratchpad/completo/exp15-0/pdf
