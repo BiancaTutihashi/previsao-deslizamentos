@@ -1,0 +1,6 @@
+modelo,f1,precisao,revocacao,f1_subida,f1_descida,mae_t0_s,mae_t1_s,mae_t2_s,ciclos_recuperados,ciclos_reais,acuracia_amostra,f1_amostra,falhos_reais,falhos_detectados,acuracia_estado,f1_falho,precisao_falho,revocacao_falho,rotulos
+LSTM,0.8113,0.8113,0.8113,0.9636,0.6471,0.0000,0.8811,0.0748,30,51,0.9973,0.8897,7,7,0.8571,0.0000,0.0000,0.0000,arquivo
+Random Forest,0.7925,0.7925,0.7925,0.9636,0.6078,0.0000,1.1536,0.0748,28,51,0.9967,0.8703,7,7,0.8571,0.0000,0.0000,0.0000,arquivo
+Limiar simples (Otsu),0.7157,0.7449,0.6887,0.8868,0.5306,0.0513,0.8004,28.2848,20,51,0.9927,0.5225,7,7,0.7907,0.6087,0.4375,1.0000,arquivo
+Heurístico (mediana+Otsu),0.7157,0.7449,0.6887,0.8868,0.5306,0.0513,0.8004,28.2848,20,51,0.9964,0.8037,7,7,0.7907,0.6087,0.4375,1.0000,arquivo
+Regressão Logística,0.7075,0.7075,0.7075,0.9636,0.4314,0.0022,1.4476,0.0781,19,51,0.9956,0.8345,7,7,0.8571,0.0000,0.0000,0.0000,arquivo
